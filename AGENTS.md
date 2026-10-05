@@ -240,6 +240,26 @@ parity and does not is worse than none:
   and `config set theme` is the case that does not: it writes the row and the
   running window keeps the theme it started with.
 
+## An agent writing on GitHub says so
+
+Anything an agent posts to GitHub in the maintainer's name — a pull request
+comment, an issue reply, a review, a close — starts with 🤖, as the first
+character of the message, before anything else:
+
+```
+🤖 Thanks. I moved in_regular_hours into the test module before merging …
+```
+
+The account is a person's, so without the marker a contributor has no way to
+tell whether the thing arguing with their design decision read their code or
+generated a paragraph about it. One character tells them, and it tells them
+before they have read the argument rather than after.
+
+It goes on what the project says, not on what it does: commit messages, PR
+descriptions and code comments carry no marker. Co-authorship in a commit
+trailer already records that, and a comment in the source is the project's
+voice regardless of who typed it.
+
 ## Releasing
 
 ```sh

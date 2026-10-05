@@ -149,6 +149,10 @@ something they would otherwise be surprised by — a commit you pushed to their
 branch, a follow-up the merge leaves open. Everything else you wanted to say
 belongs in the report to the owner, not on the PR.
 
+Every comment you post is written from the maintainer's account, so it opens
+with 🤖 as its first character — see "An agent writing on GitHub says so" in
+AGENTS.md.
+
 ## Declining it
 
 Close with thanks and a short reason, and point at the thing that already
