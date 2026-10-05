@@ -200,6 +200,17 @@ pub fn is_command(args: &[String]) -> bool {
     matches!(first, "help" | "surface") || spec::SURFACE.iter().any(|n| n.name == first)
 }
 
+/// Does this command have to run in the process it was typed in?
+///
+/// The whole noun, not the verbs that happen to write something: `--help` and
+/// a misspelled flag have to be answered by the process whose environment the
+/// answer describes, or the help is right about somebody else's machine. See
+/// [`spec::Noun::local`] for which nouns those are and why.
+pub fn runs_in_the_caller(args: &[String]) -> bool {
+    let Some(first) = args.get(1).map(String::as_str) else { return false };
+    spec::SURFACE.iter().any(|noun| noun.name == first && noun.local)
+}
+
 /// Run one command.
 ///
 /// `live` is the window when there is one. Its absence is not an error: the
@@ -591,6 +602,40 @@ mod tests {
         let outcome = run(&args, &store, Some(&Breaks));
         assert_eq!(outcome.code, EXIT_BUG);
         assert!(outcome.err.contains("status show"), "it has to say which: {}", outcome.err);
+    }
+
+    /// `main` asks this to decide where a command runs, so the answer has to
+    /// come out of the table rather than from a noun's name written down a
+    /// second time there — and it is the whole noun either way. A `--help` or
+    /// a misspelled flag answered by the window would be right about the
+    /// window's machine and wrong about the one somebody typed on.
+    #[test]
+    fn a_caller_local_noun_runs_in_the_caller_however_it_is_typed() {
+        for noun in spec::SURFACE {
+            for tail in ["", " status", " install --to", " --help", " nonsense"] {
+                let typed = format!("omacharts {}{tail}", noun.name);
+                let args: Vec<String> = typed.split_whitespace().map(String::from).collect();
+                assert_eq!(runs_in_the_caller(&args), noun.local, "{typed}");
+            }
+        }
+    }
+
+    /// The bug this is here for: with a window open, `skill` was handed to it,
+    /// so `CODEX_HOME` came from the window's environment and a relative
+    /// `--to` resolved against the window's working directory — never the
+    /// directory the person was standing in.
+    #[test]
+    fn skill_is_a_caller_local_noun() {
+        let skill = spec::SURFACE.iter().find(|noun| noun.name == "skill").expect("a skill noun");
+        assert!(skill.local);
+    }
+
+    #[test]
+    fn a_symbol_or_a_bare_option_is_not_a_caller_local_command() {
+        for typed in ["omacharts", "omacharts NVDA", "omacharts --help", "omacharts --version"] {
+            let args: Vec<String> = typed.split_whitespace().map(String::from).collect();
+            assert!(!runs_in_the_caller(&args), "{typed}");
+        }
     }
 
     #[test]

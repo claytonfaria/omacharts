@@ -26,6 +26,12 @@ describe a command that does not exist.
 
 You do not choose between them and there is no flag for it.
 
+`skill` is the exception. It runs in the process you typed it in whether or not
+the app is open, because the answer is about your machine and not the window's:
+the agent variables it reads are the ones you were given, and a relative
+`skill install --to DIR` resolves from the directory you are standing in.
+`skill status` and `skill uninstall` are the same.
+
 ## Exit codes
 
 An exit code is the only thing a script can rely on without parsing text.

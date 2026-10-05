@@ -17,13 +17,24 @@ const APP_ID: &str = "com.jorgemanrubia.Omacharts";
 fn main() -> glib::ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    // Where a command goes depends on one thing: whether there is a window to
-    // show its result in.
+    // A few commands answer for the process they were typed in, and the bus is
+    // never asked about them: handing `skill` to the window would report on
+    // the window's agent variables and resolve a relative `--to` against the
+    // window's working directory, which is nobody's intention. The spec says
+    // which, and they are the commands that read no database — so none is
+    // opened, and `skill status` still answers on a machine whose database
+    // cannot be written.
+    if cli::runs_in_the_caller(&args) {
+        let nothing = Store::memory().expect("an empty database");
+        return report(cli::run(&args, &nothing, None));
+    }
+
+    // Everything else goes where its result can be shown.
     //
-    // With one open, the command is handed to it, so a watchlist created in a
-    // terminal appears in the rail at once rather than after a restart. GTK's
-    // single-instance hand-off carries the output and the exit status back to
-    // this process, so nothing is lost by running it somewhere else.
+    // With a window open, the command is handed to it, so a watchlist created
+    // in a terminal appears in the rail at once rather than after a restart.
+    // GTK's single-instance hand-off carries the output and the exit status
+    // back to this process, so nothing is lost by running it somewhere else.
     //
     // With nothing open, the same command runs right here against the
     // database — no GTK, no display, no window. That is what makes this

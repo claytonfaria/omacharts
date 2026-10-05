@@ -80,6 +80,17 @@ pub struct Verb {
 pub struct Noun {
     pub name: &'static str,
     pub about: &'static str,
+    /// Runs in the process it was typed in, window or no window.
+    ///
+    /// Everything else goes to the window when there is one, so that a
+    /// watchlist created in a terminal appears in the rail at once. These are
+    /// the commands that would answer the wrong question there: `skill` reads
+    /// the agent variables the caller was given and resolves a relative
+    /// `--to` against the directory the caller was in, neither of which the
+    /// window shares. They also touch no database, which is why
+    /// [`crate::cli::runs_in_the_caller`] is what decides whether one is
+    /// opened — a verb needing the store cannot be marked this way.
+    pub local: bool,
     pub verbs: &'static [Verb],
 }
 
@@ -143,6 +154,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "status",
         about: "What the app has open right now",
+        local: false,
         verbs: &[Verb {
             name: "show",
             about: "The open chartbook, the focused chart, and what else is arranged around it",
@@ -157,6 +169,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "symbol",
         about: "Search the instrument inventory",
+        local: false,
         verbs: &[
             Verb {
                 name: "search",
@@ -186,6 +199,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "watchlist",
         about: "Watchlists and the symbols in them",
+        local: false,
         verbs: &[
             Verb {
                 name: "list",
@@ -321,6 +335,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "section",
         about: "The named groups inside a watchlist",
+        local: false,
         verbs: &[
             Verb {
                 name: "list",
@@ -397,6 +412,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "chartbook",
         about: "Saved arrangements of charts",
+        local: false,
         verbs: &[
             Verb {
                 name: "screenshot",
@@ -495,6 +511,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "chart",
         about: "The charts inside a chartbook",
+        local: false,
         verbs: &[
             Verb {
                 name: "list",
@@ -628,6 +645,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "config",
         about: "Stored preferences",
+        local: false,
         verbs: &[
             Verb {
                 name: "list",
@@ -684,6 +702,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "skill",
         about: "The agent skill that teaches an agent to drive this app",
+        local: true,
         verbs: &[
             Verb {
                 name: "status",
@@ -723,6 +742,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "plugin",
         about: "The Omacharts widget in the Omarchy bar",
+        local: false,
         verbs: &[
             Verb {
                 name: "status",
@@ -762,6 +782,7 @@ pub const SURFACE: &[Noun] = &[
     Noun {
         name: "cache",
         about: "The cached market data",
+        local: false,
         verbs: &[
             Verb {
                 name: "status",
