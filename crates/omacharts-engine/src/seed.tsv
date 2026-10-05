@@ -1,7 +1,10 @@
 # kind	symbol	name	suffix	currency	tier	session_origin	yahoo_override
 # Curated inventory shipped in the binary. Canonical, neutral symbols: the
 # Yahoo provider adds ^ / =F / =X from the kind. session_origin is seconds
-# past midnight UTC that the session opens (futures: 18:00 ET).
+# past midnight UTC that the session opens (futures: 18:00 ET; Taipei:
+# 09:00, which is 01:00 UTC). Three optional columns follow the eighth:
+# exchange, popularity, and local_name — the name it goes by where it
+# trades, searched alongside the English one.
 index	GSPC	S&P 500	-	USD	0	0	-
 index	NDX	Nasdaq 100	-	USD	0	0	-
 index	IXIC	Nasdaq Composite	-	USD	0	0	-
@@ -27,7 +30,7 @@ index	AXJO	ASX 200	-	AUD	1	0	-
 index	GSPTSE	S&P/TSX Composite	-	CAD	1	0	-
 index	BVSP	Bovespa	-	BRL	2	0	-
 index	KS11	KOSPI	-	KRW	2	0	-
-index	TWII	Taiwan Weighted	-	TWD	2	0	-
+index	TWII	TAIEX (Taiwan Weighted Index)	-	TWD	1	3600	-	-	-	加權指數
 index	BSESN	BSE Sensex	-	INR	2	0	-
 index	DXY	US Dollar Index	-	USD	0	0	DX-Y.NYB
 future_root	ES	E-mini S&P 500	-	USD	0	79200	-
@@ -217,6 +220,31 @@ equity	ROG	Roche Holding	SW	CHF	2	0	-
 equity	7203	Toyota Motor	T	JPY	1	0	-
 equity	6758	Sony Group	T	JPY	1	0	-
 equity	9984	SoftBank Group	T	JPY	2	0	-
+equity	2330	Taiwan Semiconductor Manufacturing (TSMC)	TW	TWD	1	3600	-
+equity	2317	Hon Hai Precision Industry (Foxconn)	TW	TWD	1	3600	-
+equity	2454	MediaTek	TW	TWD	1	3600	-
+equity	2308	Delta Electronics	TW	TWD	2	3600	-
+equity	2382	Quanta Computer	TW	TWD	2	3600	-
+equity	2303	United Microelectronics (UMC)	TW	TWD	2	3600	-
+equity	3711	ASE Technology Holding	TW	TWD	2	3600	-
+equity	2357	ASUSTeK Computer	TW	TWD	2	3600	-
+equity	3231	Wistron	TW	TWD	2	3600	-
+equity	2345	Accton Technology	TW	TWD	2	3600	-
+equity	3008	Largan Precision	TW	TWD	2	3600	-
+equity	2412	Chunghwa Telecom	TW	TWD	2	3600	-
+equity	2881	Fubon Financial Holding	TW	TWD	2	3600	-
+equity	2882	Cathay Financial Holding	TW	TWD	2	3600	-
+equity	2891	CTBC Financial Holding	TW	TWD	2	3600	-
+equity	2886	Mega Financial Holding	TW	TWD	2	3600	-
+equity	1301	Formosa Plastics	TW	TWD	2	3600	-
+equity	2002	China Steel	TW	TWD	2	3600	-
+equity	2603	Evergreen Marine	TW	TWD	2	3600	-
+equity	6488	GlobalWafers	TWO	TWD	2	3600	-
+equity	5347	Vanguard International Semiconductor	TWO	TWD	2	3600	-
+etf	0050	Yuanta Taiwan Top 50 ETF	TW	TWD	1	3600	-
+etf	0056	Yuanta Taiwan High Dividend ETF	TW	TWD	2	3600	-
+etf	00878	Cathay Sustainable High Dividend ETF	TW	TWD	2	3600	-
+etf	006208	Fubon Taiwan Top 50 ETF	TW	TWD	2	3600	-
 fx	EURUSD	Euro / US Dollar	-	USD	0	0	-
 fx	GBPUSD	British Pound / US Dollar	-	USD	0	0	-
 fx	USDJPY	US Dollar / Japanese Yen	-	JPY	0	0	-
@@ -228,6 +256,7 @@ fx	EURGBP	Euro / British Pound	-	GBP	2	0	-
 fx	EURJPY	Euro / Japanese Yen	-	JPY	2	0	-
 fx	USDMXN	US Dollar / Mexican Peso	-	MXN	2	0	-
 fx	USDCNY	US Dollar / Chinese Yuan	-	CNY	2	0	-
+fx	USDTWD	US Dollar / Taiwan Dollar	-	TWD	2	0	-	-	-	美元/新台幣
 crypto	BTC	Bitcoin	-	USD	0	0	-
 crypto	ETH	Ethereum	-	USD	0	0	-
 crypto	SOL	Solana	-	USD	1	0	-

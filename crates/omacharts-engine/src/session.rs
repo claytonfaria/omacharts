@@ -5,14 +5,17 @@
 //! trades at 3am stretch the price scale and leave the session everyone
 //! actually traded squashed into a corner.
 //!
-//! So the chart can ask for regular hours only. The window is the US cash
-//! session in New York, which is what "RTH" means for most of what this app
-//! charts — US equities, the index futures that track them, and the US
-//! indexes themselves. Instruments that keep other hours, or no hours at all,
+//! So the chart can ask for regular hours only. Each market keeps its own
+//! clock: New York's cash session is what "RTH" means for most of what this
+//! app charts — US equities, the index futures that track them, and the US
+//! indexes themselves — and Taipei's is the TWSE's and the TPEx's.
+//! Instruments that keep hours this module does not know, or no hours at all,
 //! are left alone, because filtering them would only throw data away.
 
 use chrono::{Datelike, TimeZone, Timelike, Weekday};
 use chrono_tz::America::New_York;
+use chrono_tz::Asia::Taipei;
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use crate::bars::Bar;
@@ -50,52 +53,96 @@ impl Session {
     }
 }
 
-/// Minutes past midnight, New York time, that the cash session runs between.
-const OPEN: u32 = 9 * 60 + 30;
-const CLOSE: u32 = 16 * 60;
-
-/// Minutes past midnight, New York time, that pre- and post-market trading
-/// runs between.
+/// One cash market's day, in its own wall-clock time.
 ///
-/// Wider than [`OPEN`] and [`CLOSE`] deliberately, because the two windows
-/// answer different questions. Those say which bars belong on a regular-hours
-/// chart; these say whether another bar is still coming at all — and somebody
-/// with a chart open at eight in the morning is watching it precisely because
-/// the pre-market is moving.
-const EXTENDED_OPEN: u32 = 4 * 60;
-const EXTENDED_CLOSE: u32 = 20 * 60;
+/// Two windows rather than one, and deliberately, because they answer
+/// different questions. `regular` says which bars belong on a regular-hours
+/// chart; `trading` says whether another bar is still coming at all — and
+/// somebody with a chart open at eight in the morning is watching it
+/// precisely because the pre-market is moving.
+struct Market {
+    zone: Tz,
+    /// Minutes past local midnight, open inclusive and close exclusive.
+    regular: (u32, u32),
+    trading: (u32, u32),
+}
+
+impl Market {
+    /// Minutes past midnight and the weekday, where this market keeps them.
+    ///
+    /// Timezone-aware rather than a fixed offset, because a session keeps its
+    /// local hours across daylight saving while its UTC offset moves.
+    fn local(&self, ts: i64) -> Option<(Weekday, u32)> {
+        let local = self.zone.timestamp_opt(ts, 0).single()?;
+        Some((local.weekday(), local.hour() * 60 + local.minute()))
+    }
+
+    /// Is `ts` a weekday inside one of this market's windows?
+    fn open(&self, (start, end): (u32, u32), ts: i64) -> bool {
+        self.local(ts).is_some_and(|(day, minutes)| weekday(day) && (start..end).contains(&minutes))
+    }
+}
+
+fn weekday(day: Weekday) -> bool {
+    !matches!(day, Weekday::Sat | Weekday::Sun)
+}
+
+/// The US cash market. The bar stamped at 16:00 belongs to the post-market,
+/// not to this session; the pre- and post-market run 04:00 to 20:00.
+const NEW_YORK: Market = Market {
+    zone: New_York,
+    regular: (9 * 60 + 30, 16 * 60),
+    trading: (4 * 60, 20 * 60),
+};
+
+/// The Taiwan Stock Exchange and the Taipei Exchange, which keep one clock.
+///
+/// Continuous trading runs 09:00 to 13:25 and the closing auction prints at
+/// 13:30 — a bar stamped 13:30 *is* the close, unlike New York's 16:00 bar,
+/// so the regular window runs a minute past it to keep it. The trading window
+/// is wider at both ends: orders are taken from 08:30, and the fixed-price
+/// after-hours session runs 14:00 to 14:30. Taiwan has no daylight saving,
+/// so this is 01:00 to 05:30 UTC all year.
+const TAIPEI: Market = Market {
+    zone: Taipei,
+    regular: (9 * 60, 13 * 60 + 31),
+    trading: (8 * 60 + 30, 14 * 60 + 30),
+};
 
 /// Minutes past midnight, New York time, of the hour the futures session
 /// breaks for each day, which is also where its week starts and ends.
 const BREAK_START: u32 = 17 * 60;
 const BREAK_END: u32 = 18 * 60;
 
-/// Does restricting to regular hours mean anything for this instrument?
+/// The cash market whose clock this instrument keeps, when it is one this
+/// module knows.
 ///
-/// FX and crypto have no cash session; neither does anything listed outside
-/// the US, whose hours are not New York's.
-///
-/// A foreign listing says so with its suffix. An index never carries one, so
+/// FX and crypto have no cash session. A listing says where it trades with
+/// its suffix — `.TW` for the TWSE, `.TWO` for the TPEx, and any other is
+/// abroad on hours this module does not know. An index never carries one, so
 /// it says so with its currency instead: the DAX's session is 09:00-17:30 in
 /// Frankfurt and the Nikkei's has closed before New York opens. Holding those
 /// to 09:30-16:00 in New York keeps two hours of the DAX's day and none at
 /// all of the Nikkei's.
-pub fn has_regular_hours(instrument: &Instrument) -> bool {
-    if instrument.suffix.is_some() {
-        return false;
-    }
-    // Unknown currency is treated as dollars: it is what a ticker typed into
-    // the search field with nothing behind it turns out to be.
-    if !matches!(instrument.currency.as_deref(), None | Some("USD")) {
-        return false;
-    }
-    matches!(
+fn market(instrument: &Instrument) -> Option<&'static Market> {
+    if !matches!(
         instrument.kind,
-        InstrumentKind::Equity
-            | InstrumentKind::Etf
-            | InstrumentKind::Index
-            | InstrumentKind::FutureRoot
-    )
+        InstrumentKind::Equity | InstrumentKind::Etf | InstrumentKind::Index | InstrumentKind::FutureRoot
+    ) {
+        return None;
+    }
+    match (instrument.suffix.as_deref(), instrument.currency.as_deref()) {
+        (Some("TW" | "TWO"), _) | (None, Some("TWD")) => Some(&TAIPEI),
+        // Unknown currency is treated as dollars: it is what a ticker typed
+        // into the search field with nothing behind it turns out to be.
+        (None, None | Some("USD")) => Some(&NEW_YORK),
+        _ => None,
+    }
+}
+
+/// Does restricting to regular hours mean anything for this instrument?
+pub fn has_regular_hours(instrument: &Instrument) -> bool {
+    market(instrument).is_some()
 }
 
 /// Keep only the bars inside the cash session.
@@ -103,26 +150,18 @@ pub fn has_regular_hours(instrument: &Instrument) -> bool {
 /// A no-op for daily and coarser bars — one bar already is a session — and for
 /// instruments with no cash session to speak of.
 pub fn filter(bars: &[Bar], session: Session, instrument: &Instrument, intraday: bool) -> Vec<Bar> {
-    if session == Session::Extended || !intraday || !has_regular_hours(instrument) {
+    if session == Session::Extended || !intraday {
         return bars.to_vec();
     }
-    bars.iter().copied().filter(|bar| in_regular_hours(bar.ts)).collect()
+    let Some(market) = market(instrument) else {
+        return bars.to_vec();
+    };
+    bars.iter().copied().filter(|bar| market.open(market.regular, bar.ts)).collect()
 }
 
 /// Is this instant inside the New York cash session on a weekday?
-///
-/// Timezone-aware rather than a fixed offset, because the session keeps its
-/// local hours across daylight saving while its UTC offset moves.
 pub fn in_regular_hours(ts: i64) -> bool {
-    let Some(local) = New_York.timestamp_opt(ts, 0).single() else {
-        return false;
-    };
-    if matches!(local.weekday(), Weekday::Sat | Weekday::Sun) {
-        return false;
-    }
-    let minutes = local.hour() * 60 + local.minute();
-    // The bar stamped at the close belongs to the next session, not this one.
-    (OPEN..CLOSE).contains(&minutes)
+    NEW_YORK.open(NEW_YORK.regular, ts)
 }
 
 /// Could another bar still arrive for this instrument at `ts`?
@@ -144,25 +183,13 @@ pub fn is_trading(instrument: &Instrument, ts: i64) -> bool {
     // index priced somewhere else, keeps hours this module knows nothing
     // about — and guessing would mean refusing to refresh a Madrid listing
     // right through Madrid's own session, which is worse than not asking.
-    if !has_regular_hours(instrument) {
+    let Some(market) = market(instrument) else {
         return true;
-    }
-    let Some(local) = New_York.timestamp_opt(ts, 0).single() else {
-        return false;
     };
-    let minutes = local.hour() * 60 + local.minute();
-    match instrument.kind {
-        InstrumentKind::FutureRoot => futures_are_trading(local.weekday(), minutes),
-        _ => cash_market_is_trading(local.weekday(), minutes),
+    if instrument.kind == InstrumentKind::FutureRoot {
+        return NEW_YORK.local(ts).is_some_and(|(day, minutes)| futures_are_trading(day, minutes));
     }
-}
-
-/// The US cash market's day, pre- and post-market included.
-fn cash_market_is_trading(weekday: Weekday, minutes: u32) -> bool {
-    if matches!(weekday, Weekday::Sat | Weekday::Sun) {
-        return false;
-    }
-    (EXTENDED_OPEN..EXTENDED_CLOSE).contains(&minutes)
+    market.open(market.trading, ts)
 }
 
 /// The futures week: Sunday evening through to Friday afternoon, broken for an
@@ -200,6 +227,7 @@ mod tests {
             overrides: Vec::new(),
             exchange: None,
             popularity: 0,
+            local_name: None,
         }
     }
 
@@ -424,6 +452,63 @@ mod tests {
         let before_the_bell = ny(13, 8, 0);
         assert!(!in_regular_hours(before_the_bell), "not a regular-hours bar");
         assert!(is_trading(&stock, before_the_bell), "but another one is coming");
+    }
+
+    /// A moment in Taipei. October 2026 runs Friday the 2nd, Saturday the
+    /// 3rd, Sunday the 4th, Monday the 5th.
+    fn taipei(day: u32, hour: u32, minute: u32) -> i64 {
+        Taipei.with_ymd_and_hms(2026, 10, day, hour, minute, 0).single().unwrap().timestamp()
+    }
+
+    #[test]
+    fn a_taiwan_listing_keeps_taipei_hours() {
+        for suffix in ["TW", "TWO"] {
+            let tsmc = Instrument {
+                currency: Some("TWD".into()),
+                ..instrument(InstrumentKind::Equity, Some(suffix))
+            };
+            assert!(has_regular_hours(&tsmc), ".{suffix} has a cash session");
+            let bars: Vec<Bar> = [(8, 59), (9, 0), (11, 0), (13, 25), (13, 30), (13, 31), (14, 0)]
+                .iter()
+                .map(|(h, m)| bar(taipei(5, *h, *m)))
+                .collect();
+            let kept: Vec<i64> =
+                filter(&bars, Session::Regular, &tsmc, true).iter().map(|b| b.ts).collect();
+            assert_eq!(
+                kept,
+                vec![taipei(5, 9, 0), taipei(5, 11, 0), taipei(5, 13, 25), taipei(5, 13, 30)],
+                "09:00 through the 13:30 closing auction, and nothing either side"
+            );
+        }
+    }
+
+    /// The Taipei session is the middle of New York's night. Reading it off
+    /// New York's clock, the way every suffixed listing used to be treated,
+    /// would either call it shut all day or never call it shut at all.
+    #[test]
+    fn a_taiwan_listing_is_trading_only_through_its_own_day() {
+        let tsmc = instrument(InstrumentKind::Equity, Some("TW"));
+        assert!(!is_trading(&tsmc, taipei(5, 8, 29)), "before orders are taken");
+        assert!(is_trading(&tsmc, taipei(5, 8, 30)), "the pre-open");
+        assert!(is_trading(&tsmc, taipei(5, 10, 0)), "the session");
+        assert!(is_trading(&tsmc, taipei(5, 14, 15)), "the after-hours fixed-price session");
+        assert!(!is_trading(&tsmc, taipei(5, 14, 30)), "everything has closed");
+        assert!(!is_trading(&tsmc, taipei(5, 22, 30)), "the US open is the Taipei night");
+        assert!(!is_trading(&tsmc, taipei(3, 10, 0)), "Saturday");
+        assert!(!is_trading(&tsmc, taipei(4, 10, 0)), "Sunday");
+        assert!(is_trading(&tsmc, taipei(2, 10, 0)), "Friday");
+    }
+
+    #[test]
+    fn the_taiex_keeps_taipei_hours_too() {
+        // An index never carries a suffix, so its currency is what says where
+        // it is priced.
+        let taiex = priced_in(InstrumentKind::Index, "TWD");
+        assert!(has_regular_hours(&taiex));
+        assert!(is_trading(&taiex, taipei(5, 10, 0)));
+        assert!(!is_trading(&taiex, taipei(5, 22, 0)));
+        let tokyo = instrument(InstrumentKind::Equity, Some("T"));
+        assert!(is_trading(&tokyo, taipei(5, 22, 0)), "Tokyo is not Taipei, and is not ruled on");
     }
 
     #[test]

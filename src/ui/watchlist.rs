@@ -1231,7 +1231,7 @@ impl Watchlist {
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&row_box));
         row.set_activatable(true);
-        row.set_tooltip_text(Some(&instrument.name));
+        row.set_tooltip_text(Some(&instrument.full_name()));
 
         self.wire_row_removal(&row, section_id, entry);
         self.wire_row_reorder(&row, section_id, entry);

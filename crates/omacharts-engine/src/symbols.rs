@@ -84,6 +84,74 @@ pub struct Instrument {
     /// (household name); 0 when nothing ranked it. Curated rows leave it at 0
     /// and win on `tier` instead.
     pub popularity: u8,
+    /// The name it goes by where it trades, when that is not the English one:
+    /// 台積電 for TSMC. Searched alongside `name` and shown beside it, so the
+    /// same row answers whichever language somebody types in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_name: Option<String>,
+}
+
+/// Yahoo-style venue suffixes this inventory knows, and the venue each names.
+///
+/// Also what decides whether `2330.TW` is a ticker and a suffix or one ticker
+/// with a dot in it: `BRK.B` is Berkshire's B shares, not a listing on an
+/// exchange called B.
+const VENUES: &[(&str, &str)] = &[
+    ("MC", "BME"),
+    ("L", "LSE"),
+    ("DE", "XETRA"),
+    ("PA", "Euronext"),
+    ("SW", "SIX"),
+    ("T", "TSE"),
+    ("TO", "TSX"),
+    ("AS", "Euronext"),
+    ("MI", "Borsa Italiana"),
+    ("HK", "HKEX"),
+    ("TW", "TWSE"),
+    ("TWO", "TPEx"),
+];
+
+/// Split `2330.TW` into its ticker and its venue suffix.
+///
+/// Only when what follows the last dot is a suffix some venue uses; anything
+/// else comes back whole, so `BRK.B` stays one US ticker. Case is kept as
+/// given, and the caller upper-cases if it wants to.
+pub fn split_suffix(text: &str) -> (&str, Option<&str>) {
+    match text.rsplit_once('.') {
+        Some((symbol, suffix))
+            if !symbol.is_empty() && VENUES.iter().any(|(s, _)| s.eq_ignore_ascii_case(suffix)) =>
+        {
+            (symbol, Some(suffix))
+        }
+        _ => (text, None),
+    }
+}
+
+/// Lower-cased, and with the two spellings of the same character folded into
+/// one, so a query matches however either side happened to write it.
+///
+/// 臺 and 台 are the one pair that matters in practice: official names write
+/// 臺灣 and everybody types 台灣, and a search for 台 that missed 臺灣水泥
+/// would be wrong in a way nobody could see the reason for.
+fn fold(text: &str) -> String {
+    let lower = text.to_lowercase();
+    match lower.contains('臺') {
+        true => lower.replace('臺', "台"),
+        false => lower,
+    }
+}
+
+/// Is this a character from a script written without spaces between words?
+///
+/// Those names cannot be split into words to index, so every character is
+/// indexed instead — which is what lets 積電 find 台積電.
+fn unspaced(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF     // kana
+        | 0x3400..=0x4DBF   // CJK extension A
+        | 0x4E00..=0x9FFF   // CJK unified ideographs
+        | 0xF900..=0xFAFF   // CJK compatibility ideographs
+        | 0xAC00..=0xD7AF)  // hangul
 }
 
 impl Instrument {
@@ -106,24 +174,22 @@ impl Instrument {
             return Some(named);
         }
         if let Some(suffix) = self.suffix.as_deref() {
-            return Some(match suffix {
-                "MC" => "BME",
-                "L" => "LSE",
-                "DE" => "XETRA",
-                "PA" => "Euronext",
-                "SW" => "SIX",
-                "T" => "TSE",
-                "TO" => "TSX",
-                "AS" => "Euronext",
-                "MI" => "Borsa Italiana",
-                "HK" => "HKEX",
-                other => other,
-            });
+            return Some(
+                VENUES.iter().find(|(s, _)| *s == suffix).map(|(_, venue)| *venue).unwrap_or(suffix),
+            );
         }
         match self.kind {
             InstrumentKind::Fx => Some("FX"),
             InstrumentKind::Crypto => Some("Crypto"),
             _ => None,
+        }
+    }
+
+    /// The name, and the local one beside it when there is one: `TSMC · 台積電`.
+    pub fn full_name(&self) -> String {
+        match self.local_name.as_deref() {
+            Some(local) => format!("{} · {local}", self.name),
+            None => self.name.clone(),
         }
     }
 
@@ -146,6 +212,8 @@ pub struct SearchIndex {
     items: Vec<Instrument>,
     symbol_lc: Vec<String>,
     name_lc: Vec<String>,
+    /// The local name, folded; empty for the rows that have none.
+    local_lc: Vec<String>,
     /// First character of the symbol, and of every word of the name, to the
     /// items it could match.
     buckets: HashMap<char, Vec<u32>>,
@@ -155,11 +223,13 @@ impl SearchIndex {
     pub fn new(items: Vec<Instrument>) -> SearchIndex {
         let mut symbol_lc = Vec::with_capacity(items.len());
         let mut name_lc = Vec::with_capacity(items.len());
+        let mut local_lc = Vec::with_capacity(items.len());
         let mut buckets: HashMap<char, Vec<u32>> = HashMap::new();
 
         for (i, item) in items.iter().enumerate() {
             let sym = item.symbol.to_lowercase();
-            let name = item.name.to_lowercase();
+            let name = fold(&item.name);
+            let local = item.local_name.as_deref().map(fold).unwrap_or_default();
 
             let mut firsts: Vec<char> = Vec::new();
             if let Some(c) = sym.chars().next() {
@@ -170,6 +240,8 @@ impl SearchIndex {
                     firsts.push(c);
                 }
             }
+            firsts.extend(local.chars().next());
+            firsts.extend(local.chars().filter(|c| unspaced(*c)));
             firsts.sort_unstable();
             firsts.dedup();
             for c in firsts {
@@ -178,9 +250,10 @@ impl SearchIndex {
 
             symbol_lc.push(sym);
             name_lc.push(name);
+            local_lc.push(local);
         }
 
-        SearchIndex { items, symbol_lc, name_lc, buckets }
+        SearchIndex { items, symbol_lc, name_lc, local_lc, buckets }
     }
 
     pub fn len(&self) -> usize {
@@ -223,26 +296,23 @@ impl SearchIndex {
     }
 
     /// Best matches for `query`, best first.
+    ///
+    /// A query spelled with its venue, `2330.tw`, also searches for the
+    /// ticker alone among the listings on that venue. Also, not instead: a
+    /// few canonical symbols have a dot of their own — `FTSEMIB.MI` is an
+    /// index, not a Milan listing of something called FTSEMIB — and they
+    /// still have to find themselves.
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
-        let q = query.trim().to_lowercase();
+        let q = fold(query.trim());
         if q.is_empty() {
             return self.featured(limit);
         }
-        let Some(first) = q.chars().next() else {
-            return Vec::new();
-        };
-        let Some(candidates) = self.buckets.get(&first) else {
-            return Vec::new();
-        };
-
-        let mut hits: Vec<SearchHit> = Vec::new();
-        for &i in candidates {
-            let i = i as usize;
-            if self.items[i].tier >= 3 {
-                continue;
-            }
-            if let Some(score) = self.score(i, &q) {
-                hits.push(SearchHit { index: i, score });
+        let mut hits = self.matching(&q, None);
+        if let (symbol, Some(suffix)) = split_suffix(&q) {
+            for hit in self.matching(symbol, Some(&suffix.to_uppercase())) {
+                if !hits.iter().any(|h| h.index == hit.index) {
+                    hits.push(hit);
+                }
             }
         }
         hits.sort_by(|a, b| {
@@ -252,6 +322,30 @@ impl SearchIndex {
                 .then_with(|| self.symbol_lc[a.index].cmp(&self.symbol_lc[b.index]))
         });
         hits.truncate(limit);
+        hits
+    }
+
+    /// Every row `q` matches, unsorted, optionally only those on one venue.
+    fn matching(&self, q: &str, venue: Option<&str>) -> Vec<SearchHit> {
+        let Some(first) = q.chars().next() else {
+            return Vec::new();
+        };
+        let Some(candidates) = self.buckets.get(&first) else {
+            return Vec::new();
+        };
+        let mut hits: Vec<SearchHit> = Vec::new();
+        for &i in candidates {
+            let i = i as usize;
+            if self.items[i].tier >= 3 {
+                continue;
+            }
+            if venue.is_some() && self.items[i].suffix.as_deref() != venue {
+                continue;
+            }
+            if let Some(score) = self.score(i, q) {
+                hits.push(SearchHit { index: i, score });
+            }
+        }
         hits
     }
 
@@ -285,22 +379,9 @@ impl SearchIndex {
             None
         };
 
-        let nominal = if name == q {
-            Some(EXACT)
-        } else if name.split(|c: char| !c.is_alphanumeric()).any(|w| w == q) {
-            Some(500)
-        } else if name.starts_with(q) {
-            Some(450)
-        } else if name
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|w| w.starts_with(q))
-        {
-            Some(300)
-        } else if name.contains(q) {
-            Some(180)
-        } else {
-            None
-        };
+        // The local name is the same kind of evidence as the English one, so
+        // it climbs the same ladder and the better of the two counts.
+        let nominal = name_band(name, q).max(name_band(&self.local_lc[i], q));
 
         let tier_weight = match item.tier {
             0 => 120,
@@ -344,6 +425,28 @@ impl SearchIndex {
     }
 }
 
+/// How well `q` matches one name, on the rungs [`SearchIndex::score`] uses.
+fn name_band(name: &str, q: &str) -> Option<i32> {
+    if name.is_empty() {
+        None
+    } else if name == q {
+        Some(EXACT)
+    } else if name.split(|c: char| !c.is_alphanumeric()).any(|w| w == q) {
+        Some(500)
+    } else if name.starts_with(q) {
+        Some(450)
+    } else if name
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.starts_with(q))
+    {
+        Some(300)
+    } else if name.contains(q) {
+        Some(180)
+    } else {
+        None
+    }
+}
+
 /// What a query that *is* the ticker, or *is* the name, scores before weights.
 ///
 /// Far enough above every partial band that no combination of tier, kind and
@@ -365,7 +468,7 @@ pub fn seed() -> Vec<Instrument> {
     parse_seed(include_str!("seed.tsv"))
 }
 
-/// `kind<TAB>symbol<TAB>name<TAB>suffix<TAB>currency<TAB>tier<TAB>session_origin<TAB>yahoo_override<TAB>exchange<TAB>popularity`
+/// `kind<TAB>symbol<TAB>name<TAB>suffix<TAB>currency<TAB>tier<TAB>session_origin<TAB>yahoo_override<TAB>exchange<TAB>popularity<TAB>local_name`
 ///
 /// Everything past `tier` is optional, so a file written before a column
 /// existed still parses — which is what lets the generated half gain columns
@@ -399,6 +502,7 @@ pub fn parse_seed(text: &str) -> Vec<Instrument> {
             },
             exchange: f.get(8).copied().and_then(blank),
             popularity: f.get(9).and_then(|v| v.parse().ok()).unwrap_or(0),
+            local_name: f.get(10).copied().and_then(blank),
         });
     }
     out
@@ -425,6 +529,7 @@ mod tests {
             overrides: Vec::new(),
             exchange: Some("NASDAQ".into()),
             popularity,
+            local_name: None,
         }
     }
 
@@ -481,6 +586,7 @@ mod tests {
             overrides: Vec::new(),
             exchange: Some("NASDAQ".into()),
             popularity: 0,
+            local_name: None,
         });
         let idx = SearchIndex::new(items);
         assert_eq!(idx.get(idx.search("dax", 5)[0].index).unwrap().symbol, "GDAXI");
@@ -544,6 +650,7 @@ mod tests {
             overrides: Vec::new(),
             exchange: None,
             popularity: 0,
+            local_name: None,
         };
         let rival = Instrument {
             symbol: "ZZZA".into(),
@@ -757,6 +864,38 @@ mod tests {
         // The Madrid listing must not answer a lookup for a US one.
         assert!(idx.find("SAN", None).is_none());
         assert!(idx.find("NOPE", None).is_none());
+    }
+
+    #[test]
+    fn a_venue_suffix_splits_off_and_a_share_class_does_not() {
+        assert_eq!(split_suffix("2330.TW"), ("2330", Some("TW")));
+        assert_eq!(split_suffix("6488.two"), ("6488", Some("two")), "case is the caller's");
+        assert_eq!(split_suffix("SAP.DE"), ("SAP", Some("DE")));
+        assert_eq!(split_suffix("BRK.B"), ("BRK.B", None), "a share class is part of the ticker");
+        assert_eq!(split_suffix("2330"), ("2330", None));
+        assert_eq!(split_suffix(".TW"), (".TW", None), "a venue with nothing listed on it");
+    }
+
+    #[test]
+    fn the_local_name_column_parses_and_is_searched() {
+        let row = "equity\t2330\tTSMC\tTW\tTWD\t2\t3600\t-\tTWSE\t9\t台積電";
+        let items = parse_seed(row);
+        assert_eq!(items[0].local_name.as_deref(), Some("台積電"));
+        assert_eq!(items[0].full_name(), "TSMC · 台積電");
+        assert_eq!(items[0].exchange_label(), Some("TWSE"));
+
+        let idx = SearchIndex::new(items);
+        for query in ["台積電", "台積", "積電", "臺積電", "tsmc", "2330", "2330.tw"] {
+            assert_eq!(idx.search(query, 1).len(), 1, "{query:?} found nothing");
+        }
+        assert!(idx.search("2330.de", 1).is_empty(), "the venue has to match");
+    }
+
+    #[test]
+    fn a_row_without_a_local_name_shows_its_name_alone() {
+        let apple = index().find("AAPL", None).unwrap().clone();
+        assert_eq!(apple.local_name, None);
+        assert_eq!(apple.full_name(), "Apple");
     }
 
     #[test]

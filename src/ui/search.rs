@@ -303,21 +303,30 @@ fn reveal(scroller: &gtk::ScrolledWindow, list: &gtk::ListBox, row: &gtk::ListBo
 /// decides whether it exists, and a chart that says "no data for this symbol"
 /// is a better answer than a picker that says nothing at all.
 fn unlisted(query: &str) -> Option<Instrument> {
-    let symbol = query.trim().to_uppercase();
+    let typed = query.trim().to_uppercase();
+    // `2330.TW` is a ticker on a venue, and a ticker abroad may be all
+    // digits — every Taiwanese and Japanese one is. Without a venue a ticker
+    // has to start with a letter, which is what keeps a stray number typed
+    // into the field from being offered as a US listing.
+    let (symbol, suffix) = omacharts_engine::symbols::split_suffix(&typed);
     let plausible = (1..=6).contains(&symbol.chars().count())
-        && symbol.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && symbol
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || (suffix.is_some() && c.is_ascii_digit()))
         && symbol.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
     plausible.then(|| Instrument {
-        symbol,
+        symbol: symbol.to_string(),
         name: "Not in the list — look it up anyway".to_string(),
         kind: omacharts_engine::InstrumentKind::Equity,
-        suffix: None,
+        suffix: suffix.map(str::to_string),
         currency: None,
         tier: 2,
         session_origin: 0,
         overrides: Vec::new(),
         exchange: None,
         popularity: 0,
+        local_name: None,
     })
 }
 
@@ -439,7 +448,7 @@ fn row_for(instrument: &Instrument) -> gtk::ListBoxRow {
     ticker.set_xalign(0.0);
     ticker.set_width_chars(9);
 
-    let name = gtk::Label::new(Some(&instrument.name));
+    let name = gtk::Label::new(Some(&instrument.full_name()));
     name.add_css_class("symbol-row-name");
     name.set_xalign(0.0);
     name.set_hexpand(true);

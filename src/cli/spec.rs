@@ -172,7 +172,7 @@ pub const SURFACE: &[Noun] = &[
                 name: "show",
                 about: "Everything known about one instrument",
                 args: &[
-                    Arg::req("SYMBOL", "the canonical ticker, without a venue suffix"),
+                    Arg::req("SYMBOL", "the ticker, or the ticker and its venue: SAP DE and SAP.DE are one"),
                     Arg::opt("SUFFIX", "the venue suffix for a listing abroad, such as DE"),
                 ],
                 flags: &[],
@@ -240,7 +240,7 @@ pub const SURFACE: &[Noun] = &[
             Verb {
                 name: "add",
                 about: "Put symbols in a watchlist",
-                args: &[Arg::req("LIST", SELECTOR), Arg::many("SYMBOL", "one or more tickers")],
+                args: &[Arg::req("LIST", SELECTOR), Arg::many("SYMBOL", "one or more tickers, such as NVDA or 2330.TW")],
                 flags: &[
                     Flag::valued("section", "NAME", "put them in this section rather than at the top"),
                     Flag::valued("suffix", "S", "venue suffix, applied to every symbol given"),
@@ -253,7 +253,7 @@ pub const SURFACE: &[Noun] = &[
             Verb {
                 name: "remove",
                 about: "Take symbols out of a watchlist",
-                args: &[Arg::req("LIST", SELECTOR), Arg::many("SYMBOL", "one or more tickers")],
+                args: &[Arg::req("LIST", SELECTOR), Arg::many("SYMBOL", "one or more tickers, such as NVDA or 2330.TW")],
                 flags: &[
                     Flag::valued("section", "NAME", "only from this section"),
                     Flag::valued("suffix", "S", "venue suffix, applied to every symbol given"),
@@ -549,7 +549,7 @@ pub const SURFACE: &[Noun] = &[
                 flags: &[
                     Flag::valued("book", "BOOK", "which chartbook (default: the open one)"),
                     Flag::valued("chart", "CHART", CHART_SELECTOR),
-                    Flag::valued("symbol", "SYMBOL", "the instrument to chart"),
+                    Flag::valued("symbol", "SYMBOL", "the instrument to chart, such as AAPL or 2330.TW"),
                     Flag::valued("suffix", "S", "its venue suffix, for a listing abroad"),
                     Flag::valued("resolution", "TF", "such as 5m, 1h, 1D, 1W"),
                     Flag::valued("style", "STYLE", "how bars are drawn").of(STYLES),

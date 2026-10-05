@@ -231,7 +231,7 @@ fn symbol_search(m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
             format!(
                 "{:<10} {:<34} {:<8} {}",
                 i.display_symbol(),
-                truncate(&i.name, 34),
+                truncate(&i.full_name(), 34),
                 i.kind.label(),
                 i.exchange_label().unwrap_or("")
             )
@@ -244,9 +244,9 @@ fn symbol_search(m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
 }
 
 fn symbol_show(m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let symbol = required(m, "SYMBOL")?.to_uppercase();
-    let suffix = arg(m, "SUFFIX").map(|s| s.to_uppercase());
     let index = crate::inventory::everything();
+    let (symbol, suffix) =
+        listing(&index, required(m, "SYMBOL")?, arg(m, "SUFFIX").map(|s| s.to_uppercase()));
     let found = index.find(&symbol, suffix.as_deref()).ok_or_else(|| {
         Fault::not_found(format!(
             "no instrument called {}; try `omacharts symbol search {symbol}`",
@@ -259,7 +259,7 @@ fn symbol_show(m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
     Ok(format!(
         "{}\n{}\nkind      {}\nexchange  {}\ncurrency  {}\n",
         found.display_symbol(),
-        found.name,
+        found.full_name(),
         found.kind.label(),
         found.exchange_label().unwrap_or("unknown"),
         found.currency.as_deref().unwrap_or("unknown"),
@@ -272,6 +272,7 @@ fn instrument_json(i: &omacharts_engine::Instrument) -> String {
         "suffix": i.suffix,
         "display": i.display_symbol(),
         "name": i.name,
+        "local_name": i.local_name,
         "kind": i.kind.label(),
         "exchange": i.exchange_label(),
         "currency": i.currency,
@@ -535,16 +536,18 @@ fn watchlist_add(
     let index = crate::inventory::everything();
     let mut done: Vec<String> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
-    for symbol in &symbols {
-        if index.find(symbol, suffix.as_deref()).is_none() {
-            unknown.push(spell(symbol, suffix.as_deref()));
+    for typed in &symbols {
+        // Each one on its own, so `2330.TW 6488.TWO` can share a command.
+        let (symbol, suffix) = listing(&index, typed, suffix.clone());
+        if index.find(&symbol, suffix.as_deref()).is_none() {
+            unknown.push(spell(&symbol, suffix.as_deref()));
             continue;
         }
         match adding {
-            true => store.add_to_section(section, symbol, suffix.as_deref()),
-            false => store.remove_from_section(section, symbol, suffix.as_deref()),
+            true => store.add_to_section(section, &symbol, suffix.as_deref()),
+            false => store.remove_from_section(section, &symbol, suffix.as_deref()),
         }
-        done.push(spell(symbol, suffix.as_deref()));
+        done.push(spell(&symbol, suffix.as_deref()));
     }
 
     if done.is_empty() {
@@ -1168,23 +1171,23 @@ fn chart_set(
     at: usize,
     pane: u32,
 ) -> Result<String, Fault> {
-    let suffix = arg(m, "suffix").map(|s| s.to_uppercase());
+    let given = arg(m, "suffix").map(|s| s.to_uppercase());
     let mut changed: Vec<String> = Vec::new();
 
     // Everything is checked before anything is written, so a command with one
     // bad value does not leave the chart half-changed.
-    let symbol = match arg(m, "symbol") {
-        None => None,
+    let (symbol, suffix) = match arg(m, "symbol") {
+        None => (None, given),
         Some(text) => {
-            let symbol = text.to_uppercase();
             let index = crate::inventory::everything();
+            let (symbol, suffix) = listing(&index, text, given);
             if index.find(&symbol, suffix.as_deref()).is_none() {
                 return Err(Fault::not_found(format!(
                     "no instrument called {}; try `omacharts symbol search {symbol}`",
                     spell(&symbol, suffix.as_deref())
                 )));
             }
-            Some(symbol)
+            (Some(symbol), suffix)
         }
     };
     let timeframe = match arg(m, "resolution") {
@@ -2166,6 +2169,27 @@ fn flag(m: &clap::ArgMatches, id: &str) -> bool {
     m.try_get_one::<bool>(id).ok().flatten().copied().unwrap_or(false)
 }
 
+/// A ticker as typed, and the venue suffix it was given or spelled with.
+///
+/// `--suffix TW` and `2330.TW` say the same thing, and people type the second
+/// because it is what every chart and every quote page shows. A dot that is
+/// not a venue — `BRK.B` — is part of the ticker, and so is one the inventory
+/// lists whole: `FTSEMIB.MI` is an index, not a Milan listing.
+fn listing(
+    index: &omacharts_engine::SearchIndex,
+    symbol: &str,
+    suffix: Option<String>,
+) -> (String, Option<String>) {
+    let symbol = symbol.to_uppercase();
+    if suffix.is_some() || index.find(&symbol, None).is_some() {
+        return (symbol, suffix);
+    }
+    match omacharts_engine::symbols::split_suffix(&symbol) {
+        (ticker, Some(venue)) => (ticker.to_string(), Some(venue.to_string())),
+        _ => (symbol, None),
+    }
+}
+
 /// How an instrument is written where a person reads it.
 pub fn spell(symbol: &str, suffix: Option<&str>) -> String {
     match suffix.filter(|s| !s.is_empty()) {
@@ -2446,6 +2470,53 @@ mod tests {
         let shown = run("watchlist show Semis --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&shown.out).unwrap();
         assert_eq!(parsed["sections"][0]["symbols"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_taiwan_listing_can_be_named_with_its_venue_or_with_the_flag() {
+        let store = Store::memory().unwrap();
+        run("watchlist create Taiwan", &store);
+        let out = run("watchlist add Taiwan 2330.TW 6488.TWO", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        assert_eq!(run("watchlist add Taiwan 2454 --suffix TW", &store).code, 0);
+
+        let shown = run("watchlist show Taiwan --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&shown.out).unwrap();
+        let stored: Vec<(String, String)> = parsed["sections"][0]["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["symbol"].as_str().unwrap().into(), e["suffix"].as_str().unwrap().into()))
+            .collect();
+        assert_eq!(
+            stored,
+            [("2330", "TW"), ("6488", "TWO"), ("2454", "TW")]
+                .map(|(a, b)| (a.to_string(), b.to_string())),
+            "the ticker and the venue are stored apart, however they were typed"
+        );
+    }
+
+    #[test]
+    fn a_taiwan_listing_shows_both_its_names() {
+        let store = Store::memory().unwrap();
+        let out = run("symbol show 2330.TW --json", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        let parsed: serde_json::Value = serde_json::from_str(&out.out).unwrap();
+        assert_eq!(parsed["local_name"], "台積電");
+        assert_eq!(parsed["exchange"], "TWSE");
+        assert_eq!(parsed["currency"], "TWD");
+
+        let found = run("symbol search 台積電 --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&found.out).unwrap();
+        assert_eq!(parsed["symbols"][0]["display"], "2330.TW", "{}", found.out);
+    }
+
+    #[test]
+    fn a_dot_that_is_not_a_venue_stays_in_the_ticker() {
+        let store = Store::memory().unwrap();
+        // FTSEMIB.MI is an index whose canonical symbol has the dot in it.
+        let out = run("symbol show FTSEMIB.MI --json", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
     }
 
     #[test]

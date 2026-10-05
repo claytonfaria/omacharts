@@ -5,7 +5,9 @@
 //! futures, the session origins that make a four-hour bar bucket correctly,
 //! and every future, currency pair and crypto, none of which appear in any
 //! listings feed. The generated one is every US-listed equity and ETF, built
-//! from Nasdaq Trader's daily files by `tools/build_listings.py`.
+//! from Nasdaq Trader's daily files by `tools/build_listings.py`, and every
+//! listing on the two Taiwanese exchanges, built from the TWSE's registry by
+//! `tools/build_taiwan_listings.py`.
 //!
 //! Only the curated half is ready when the window opens. The other eleven
 //! thousand are parsed on a thread afterwards and swapped in, because five
@@ -26,9 +28,18 @@ use omacharts_engine::{Instrument, SearchIndex};
 /// then a red build rather than a broken app.
 const LISTINGS: &str = include_str!("../crates/omacharts-engine/src/listings.tsv");
 
+/// Every TWSE and TPEx listing, built the same way.
+const TAIWAN_LISTINGS: &str = include_str!("../crates/omacharts-engine/src/listings_tw.tsv");
+
 /// Where a refreshed inventory would be written.
 pub fn listings_path(home: &std::path::Path) -> PathBuf {
     home.join(".local/share/omacharts/listings.tsv")
+}
+
+/// Both generated files as one text. They are two files because they come
+/// from unrelated feeds that fail independently.
+fn generated(us: &str) -> String {
+    format!("{us}\n{TAIWAN_LISTINGS}")
 }
 
 /// The index everything searches, replaced once the long tail has loaded.
@@ -77,7 +88,7 @@ impl Inventory {
 /// milliseconds, so it pays the few milliseconds once and searches
 /// everything.
 pub fn everything() -> SearchIndex {
-    SearchIndex::new(merge(LISTINGS, omacharts_engine::symbols::seed()))
+    SearchIndex::new(merge(&generated(LISTINGS), omacharts_engine::symbols::seed()))
 }
 
 /// The generated listings and the curated rows, as one list.
@@ -107,12 +118,15 @@ pub fn merge(listings: &str, mut curated: Vec<Instrument>) -> Vec<Instrument> {
         let inherited = listed
             .get(&(row.symbol.as_str(), row.suffix.as_deref()))
             .filter(|l| l.kind == row.kind)
-            .map(|l| (l.exchange.clone(), l.popularity));
-        let Some((exchange, popularity)) = inherited else {
+            .map(|l| (l.exchange.clone(), l.popularity, l.local_name.clone()));
+        let Some((exchange, popularity, local_name)) = inherited else {
             continue;
         };
         if row.exchange.is_none() {
             row.exchange = exchange;
+        }
+        if row.local_name.is_none() {
+            row.local_name = local_name;
         }
         if row.popularity == 0 {
             row.popularity = popularity;
@@ -137,7 +151,7 @@ pub fn load_in_background(inventory: Inventory, done: impl Fn(usize) + 'static) 
         // app exactly as it shipped rather than without an inventory.
         let text = std::fs::read_to_string(listings_path(&home))
             .unwrap_or_else(|_| LISTINGS.to_string());
-        let _ = sender.send_blocking(merge(&text, omacharts_engine::symbols::seed()));
+        let _ = sender.send_blocking(merge(&generated(&text), omacharts_engine::symbols::seed()));
     });
 
     glib::spawn_future_local(async move {
@@ -220,5 +234,36 @@ mod tests {
         for symbol in ["GC", "EURUSD", "BTC", "GSPC"] {
             assert!(merged.iter().any(|i| i.symbol == symbol), "{symbol} went missing");
         }
+    }
+
+    /// A Taiwan listing is a ticker that is only a number, so it is the
+    /// suffix that tells it apart from anything else — and a curated row
+    /// that names it in English alone must still answer to its Chinese name.
+    #[test]
+    fn the_taiwan_half_is_there_in_both_languages() {
+        let merged = merge(&generated(LISTINGS), omacharts_engine::symbols::seed());
+        let on = |suffix: &str| merged.iter().filter(|i| i.suffix.as_deref() == Some(suffix)).count();
+        assert!(on("TW") > 1000, "only {} TWSE listings", on("TW"));
+        assert!(on("TWO") > 800, "only {} TPEx listings", on("TWO"));
+
+        let tsmc: Vec<&Instrument> =
+            merged.iter().filter(|i| i.symbol == "2330" && i.suffix.as_deref() == Some("TW")).collect();
+        assert_eq!(tsmc.len(), 1, "2330.TW is in both files and must appear once");
+        assert_eq!(tsmc[0].tier, 1, "with the curated tier");
+        assert_eq!(tsmc[0].local_name.as_deref(), Some("台積電"));
+        assert_eq!(tsmc[0].exchange.as_deref(), Some("TWSE"), "and the venue from the listing");
+        assert_eq!(tsmc[0].popularity, 9);
+
+        let index = SearchIndex::new(merged);
+        for query in ["2330", "2330.TW", "tsmc", "台積電", "台積", "積電", "臺積電"] {
+            let first = index.search(query, 1).first().and_then(|h| index.get(h.index)).cloned();
+            assert_eq!(
+                first.map(|i| i.display_symbol()).as_deref(),
+                Some("2330.TW"),
+                "{query:?} should find TSMC first"
+            );
+        }
+        let gwc = index.search("環球晶", 1).first().and_then(|h| index.get(h.index)).cloned();
+        assert_eq!(gwc.map(|i| i.display_symbol()).as_deref(), Some("6488.TWO"), "a TPEx listing");
     }
 }

@@ -81,6 +81,11 @@ system.
 Omacharts is prepared to work with multiple data providers, but at launch only
 Yahoo Finance is supported.
 
+The symbol search covers every US-listed stock and ETF, and every listing on
+the two Taiwanese exchanges — the TWSE (`2330.TW`) and the TPEx (`6488.TWO`) —
+searchable by ticker, English name or Chinese name (`台積電`), and charted on
+Taipei's own trading hours.
+
 We are interested in adding more feeds, both free and paid. If you want to see
 yours supported, please create a Pull Request.
 
