@@ -448,7 +448,7 @@ setting touches a command: `chart screenshot` always writes a file.
 Settings are read and written by name — `config list` shows every one that has
 been written, and `config set` writes any of them.
 
-Three of them have a command of their own, because what the app does with them
+Four of them have a command of their own, because what the app does with them
 is more than storing a value. Bar colours is one:
 
 ```
@@ -503,6 +503,20 @@ chart — you asked for nothing, so there is nothing to report.
 Note that `config get auto_refresh` answers "never been set" until you change
 it, because an unwritten setting is the default rather than a row. `config
 refresh` is the one that always knows.
+
+Which colour means up is another. Green for a rise is the Western habit; in
+Taiwan, mainland China, Japan and Korea a rise is red and a fall green:
+
+```
+$ omacharts config direction red-up
+rising bars are red, falling bars green
+  [exit 0]
+```
+
+It swaps the two directions of whichever bar scheme is in use — candles,
+volume, the watchlist's change column and the bar widget all at once — and an
+open window repaints as soon as it is set. `config direction green-up` puts it
+back.
 
 ## The widget in the Omarchy bar
 

@@ -153,6 +153,8 @@ pub trait Live {
     fn reload_workspace(&self);
     /// Draw the rail again, after a command changed a watchlist.
     fn reload_watchlists(&self);
+    /// Re-read the theme, bar scheme and direction colours, and repaint.
+    fn adopt_theming(&self);
 
     /// Save a picture of the focused chart, or of the whole open chartbook.
     ///
@@ -368,7 +370,7 @@ pub fn watchlist_json(refresh_first: bool, live: Option<&dyn Live>) -> String {
     }
     out.push_str(&format!(
         "],\"colors\":{},\"updatedAt\":{}}}",
-        colors_json(),
+        colors_json(&store),
         chrono::Utc::now().timestamp()
     ));
     out
@@ -378,12 +380,14 @@ pub fn watchlist_json(refresh_first: bool, live: Option<&dyn Live>) -> String {
 ///
 /// Sent with the data rather than hardcoded in the widget, so the bar and the
 /// window cannot disagree about what up looks like — and so changing the
-/// desktop theme moves both.
-fn colors_json() -> String {
+/// desktop theme moves both. The direction convention is applied here for
+/// the same reason: a red-up window beside a green-up bar would be two
+/// answers to which way the market went.
+fn colors_json(store: &Store) -> String {
     let home = crate::store::home();
     let theme = omacharts_engine::omarchy::current(&home)
         .unwrap_or_else(|| omacharts_engine::theme::builtin_themes()[0].clone());
-    let bars = omacharts_engine::theme_bars(&theme);
+    let bars = crate::theming::convention(store).apply(omacharts_engine::theme_bars(&theme));
     use omacharts_engine::Direction;
     format!(
         "{{\"up\":{},\"down\":{},\"flat\":{},\"foreground\":{}}}",
@@ -472,6 +476,10 @@ impl Live for Rc<crate::ui::Window> {
         crate::ui::Window::reload_watchlists(self);
     }
 
+    fn adopt_theming(&self) {
+        crate::ui::Window::adopt_theming(self);
+    }
+
     fn screenshot(
         &self,
         whole_book: bool,
@@ -511,6 +519,7 @@ mod tests {
         }
         fn reload_workspace(&self) {}
         fn reload_watchlists(&self) {}
+        fn adopt_theming(&self) {}
         fn warm(&self, _instruments: &[Instrument]) {}
         fn screenshot(
             &self,
@@ -538,12 +547,18 @@ mod tests {
 
     #[test]
     fn the_payload_carries_the_themes_direction_colours() {
-        let parsed: serde_json::Value = serde_json::from_str(&colors_json()).unwrap();
+        let store = Store::memory().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&colors_json(&store)).unwrap();
         for key in ["up", "down", "flat", "foreground"] {
             let value = parsed[key].as_str().unwrap_or_default();
             assert!(value.starts_with('#') && value.len() >= 7, "{key}: {value:?}");
         }
         assert_ne!(parsed["up"], parsed["down"], "up and down must differ");
+
+        // The bar follows the window's convention, not its own.
+        store.set_setting(crate::theming::SETTING_CONVENTION, "red-up");
+        let red: serde_json::Value = serde_json::from_str(&colors_json(&store)).unwrap();
+        assert_eq!((&red["up"], &red["down"]), (&parsed["down"], &parsed["up"]));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use omacharts_engine::theme::{
-    BarScheme, BarSlot, Source, Theme, UiSlot, FALLBACK_THEME_ID, OMARCHY_ID, SWATCH_NAMES,
+    BarScheme, BarSlot, Convention, Source, Theme, UiSlot, FALLBACK_THEME_ID, OMARCHY_ID, SWATCH_NAMES,
     THEME_BARS_ID, THEME_MONO_ID,
 };
 
@@ -218,9 +218,11 @@ fn bars_group(context: &Rc<Context>) -> adw::PreferencesGroup {
     let selected = ids.iter().position(|id| id == theming.scheme_id()).unwrap_or(0);
     let source = theming.bar_scheme().source;
     let monochrome = theming.scheme_id() == THEME_MONO_ID;
+    let convention = theming.convention();
     drop(theming);
 
     group.add(&colouring_row(context, monochrome));
+    group.add(&convention_row(context, convention));
 
     let row = adw::ComboRow::new();
     row.set_title("Bar scheme");
@@ -283,6 +285,28 @@ fn colouring_row(context: &Rc<Context>, monochrome: bool) -> adw::ComboRow {
                 theming.select_bar_scheme(&back, &ctx.store);
             }
         }
+        apply(&ctx);
+        rebuild(&ctx);
+    });
+    row
+}
+
+/// Which colour a rise is painted in.
+///
+/// Asked as the colour of a rising bar because that is how the habit is
+/// described by the people who have it: in Taipei and Tokyo red is up. With a
+/// scheme that is not green and red — the accessible one, a custom one — "Red"
+/// still means what it does there: the scheme's two directions, swapped.
+fn convention_row(context: &Rc<Context>, convention: Convention) -> adw::ComboRow {
+    let row = adw::ComboRow::new();
+    row.set_title("Rising bars");
+    row.set_model(Some(&string_list(&["Green".to_string(), "Red".to_string()])));
+    row.set_selected(u32::from(convention == Convention::RedUp));
+
+    let ctx = context.clone();
+    row.connect_selected_notify(move |row| {
+        let Some(&chosen) = Convention::ALL.get(row.selected() as usize) else { return };
+        ctx.theming.borrow_mut().select_convention(chosen, &ctx.store);
         apply(&ctx);
         rebuild(&ctx);
     });
@@ -356,7 +380,9 @@ fn duplicate_row(context: &Rc<Context>, source: Source, is_theme: bool) -> adw::
                 theming.reload_custom(&ctx.store);
                 theming.select_theme(&id, &ctx.store);
             } else {
-                let base = theming.bar_scheme();
+                // As stored, not as painted: a copy taken the painted way
+                // round would be swapped a second time the moment it was drawn.
+                let base = theming.chosen_bar_scheme();
                 let (id, name) = unique_name(
                     &base.name,
                     &theming.bar_schemes().iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
@@ -467,12 +493,17 @@ fn bar_colors_group(context: &Rc<Context>, group_name: &str) -> adw::Preferences
                 (rgba.blue() * 255.0).round() as u8,
                 (rgba.alpha() * 255.0).round() as u8,
             );
-            let mut scheme = ctx.theming.borrow().bar_scheme();
+            // The buttons show the scheme as painted, so "Up outline" is the
+            // colour up actually is; the edit is made there and turned back
+            // the stored way round before it is saved.
+            let theming = ctx.theming.borrow();
+            let mut scheme = theming.bar_scheme();
             if !scheme.source.is_editable() {
                 return;
             }
             BarSlot::set(slot, &mut scheme, hex);
-            ctx.store.save_bar_scheme(&scheme);
+            ctx.store.save_bar_scheme(&theming.convention().apply(scheme));
+            drop(theming);
             ctx.theming.borrow_mut().reload_custom(&ctx.store);
             apply(&ctx);
         });

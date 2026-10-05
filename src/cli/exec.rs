@@ -137,6 +137,7 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("config", "set") => config_set(store, m, json),
         ("config", "bars") => config_bars(store, m, json),
         ("config", "refresh") => config_refresh(store, m, json),
+        ("config", "direction") => config_direction(store, m, json, live),
 
         ("plugin", "status") => plugin_status(json),
         ("plugin", "install") => plugin_install(json),
@@ -1992,6 +1993,42 @@ fn config_bars(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<Str
     said(as_json, json!({"bars": spell_bars(wants_mono), "scheme": scheme}), text)
 }
 
+/// Which colour a rise is painted in: green, or red the way Taiwan, China,
+/// Japan and Korea read a chart.
+///
+/// The key and its reader are `Theming`'s own, so the window and this command
+/// cannot spell it differently. The window is told to repaint because nothing
+/// else would make it: it paints from the convention it read when it started,
+/// and a candle has no row to reload.
+fn config_direction(
+    store: &Store,
+    m: &clap::ArgMatches,
+    as_json: bool,
+    live: Option<&dyn Live>,
+) -> Result<String, Fault> {
+    use crate::theming::{convention, SETTING_CONVENTION};
+    use omacharts_engine::Convention;
+    let Some(key) = arg(m, "CONVENTION") else {
+        let key = convention(store).key();
+        return match as_json {
+            true => Ok(format!("{}\n", json!({"direction": key}))),
+            false => Ok(format!("{key}\n")),
+        };
+    };
+    let Some(chosen) = Convention::from_key(key) else {
+        return Err(Fault::usage(format!("no such convention: {key}")));
+    };
+    store.set_setting(SETTING_CONVENTION, chosen.key());
+    if let Some(live) = live {
+        live.adopt_theming();
+    }
+    let text = match chosen {
+        Convention::GreenUp => "rising bars are green, falling bars red",
+        Convention::RedUp => "rising bars are red, falling bars green",
+    };
+    said(as_json, json!({"direction": chosen.key()}), text.to_string())
+}
+
 fn spell_bars(mono: bool) -> &'static str {
     match mono {
         true => "monochrome",
@@ -2748,6 +2785,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_direction_colours_can_be_read_set_and_refused() {
+        let store = Store::memory().unwrap();
+        assert_eq!(run("config direction", &store).out.trim(), "green-up");
+        assert_eq!(run("config direction red-up", &store).code, 0);
+        assert_eq!(run("config direction", &store).out.trim(), "red-up");
+        assert_eq!(run("config direction sideways", &store).code, super::super::EXIT_USAGE);
+        assert_eq!(run("config direction", &store).out.trim(), "red-up", "and left it alone");
+    }
+
+    /// The command writes and the window paints, so they have to agree on the
+    /// key. Written through the command and read back through `Theming`, which
+    /// is what a window adopting the change does.
+    #[test]
+    fn the_direction_a_command_sets_is_the_one_the_window_paints() {
+        let store = Store::memory().unwrap();
+        let green = crate::theming::Theming::load(&store).bar_scheme();
+        run("config direction red-up", &store);
+        let red = crate::theming::Theming::load(&store).bar_scheme();
+        assert_eq!((red.up, red.down), (green.down, green.up));
+    }
+
     /// The preferences dialog remembers the coloured scheme under this key and
     /// its own constant is private to it, so a rename there would leave the two
     /// quietly disagreeing: the dialog would put back a scheme the terminal
@@ -3015,6 +3074,7 @@ mod tests {
         fn flush_workspace(&self) {}
         fn reload_workspace(&self) {}
         fn reload_watchlists(&self) {}
+        fn adopt_theming(&self) {}
         fn warm(&self, _instruments: &[omacharts_engine::Instrument]) {}
 
         /// A test has no pixels. The other methods stand in for a window; this

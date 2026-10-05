@@ -107,6 +107,7 @@ const SWITCHES: &[&str] = &["on", "off"];
 const LINKS: &[&str] =
     &["none", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 const COLOURING: &[&str] = &["coloured", "monochrome"];
+const CONVENTIONS: &[&str] = &["green-up", "red-up"];
 
 /// How a colour is written on the command line.
 ///
@@ -679,6 +680,16 @@ pub const SURFACE: &[Noun] = &[
                 writes: true,
                 workspace: false,
             },
+            Verb {
+                name: "direction",
+                about: "Whether a rise is painted green and a fall red, or the other way round",
+                args: &[Arg::opt("CONVENTION", "omit to read it").of(CONVENTIONS)],
+                flags: &[],
+                example: "omacharts config direction red-up",
+                json: true,
+                writes: true,
+                workspace: false,
+            },
         ],
     },
     Noun {
@@ -844,12 +855,18 @@ const STORED_FIELDS: &[(&str, &str, &str)] = &[
 mod tests {
     use super::*;
     use omacharts_engine::indicators::{LineStyle, MAX_PANE_SHARE, MIN_PANE_SHARE};
-    use omacharts_engine::{link, BarStyle, IndicatorKind, Reset, Session, Timeframe};
+    use omacharts_engine::{link, BarStyle, Convention, IndicatorKind, Reset, Session, Timeframe};
 
     #[test]
     fn the_bar_styles_on_offer_are_the_ones_that_exist() {
         let engine: Vec<&str> = BarStyle::ALL.iter().map(|s| s.key()).collect();
         assert_eq!(STYLES, engine.as_slice());
+    }
+
+    #[test]
+    fn the_direction_conventions_on_offer_are_the_ones_that_exist() {
+        let engine: Vec<&str> = Convention::ALL.iter().map(|c| c.key()).collect();
+        assert_eq!(CONVENTIONS, engine.as_slice());
     }
 
     #[test]
