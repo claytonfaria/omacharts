@@ -16,8 +16,8 @@ use std::fmt::Write as _;
 
 use omacharts_engine::frame::{GUTTER_WIDTH, RING_WIDTH};
 use omacharts_engine::theme::{
-    builtin_bar_schemes, builtin_themes, theme_bars, theme_mono_bars, BarScheme, Convention, Mode,
-    Theme, FALLBACK_THEME_ID, OMARCHY_ID, THEME_BARS_ID,
+    builtin_bar_schemes, builtin_themes, theme_bars, theme_mono_bars, theme_red_up_bars, BarScheme,
+    Mode, Theme, FALLBACK_THEME_ID, OMARCHY_ID, THEME_BARS_ID,
 };
 use omacharts_engine::omarchy;
 
@@ -26,13 +26,6 @@ use crate::ui::colors;
 
 pub const SETTING_THEME: &str = "theme";
 pub const SETTING_BARS: &str = "bar_scheme";
-pub const SETTING_CONVENTION: &str = "direction_colours";
-
-/// Which colour means up, as stored. Anything unreadable is the default, so a
-/// hand-written row cannot leave the chart with no idea which way is up.
-pub fn convention(store: &Store) -> Convention {
-    store.setting(SETTING_CONVENTION).and_then(|key| Convention::from_key(&key)).unwrap_or_default()
-}
 
 pub struct Theming {
     home: PathBuf,
@@ -45,7 +38,6 @@ pub struct Theming {
     custom_schemes: Vec<BarScheme>,
     theme_id: String,
     scheme_id: String,
-    convention: Convention,
     provider: Option<gtk::CssProvider>,
 }
 
@@ -62,7 +54,6 @@ impl Theming {
         Theming {
             theme_id: store.setting(SETTING_THEME).unwrap_or_else(|| default_theme.to_string()),
             scheme_id: store.setting(SETTING_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string()),
-            convention: convention(store),
             omarchy,
             omarchy_fingerprint,
             builtin_themes: builtin_themes(),
@@ -90,12 +81,13 @@ impl Theming {
     /// Every bar scheme on offer. The first is built from the active theme, so
     /// candles match the desktop without the user choosing anything.
     pub fn bar_schemes(&self) -> Vec<BarScheme> {
-        // Both theme-derived schemes, because neither can come from the fixed
+        // Every theme-derived scheme, because none can come from the fixed
         // built-in list: each is built from whichever theme is active. Leaving
-        // the monochrome one out does not disable it — it makes the setting
-        // write an id nothing can resolve, and `bar_scheme` then falls back to
-        // colour without saying so.
-        let mut out = vec![theme_bars(&self.theme()), theme_mono_bars(&self.theme())];
+        // one out does not disable it — it makes the setting write an id
+        // nothing can resolve, and `bar_scheme` then falls back to colour
+        // without saying so.
+        let theme = self.theme();
+        let mut out = vec![theme_bars(&theme), theme_red_up_bars(&theme), theme_mono_bars(&theme)];
         out.extend(self.builtin_schemes.iter().cloned());
         out.extend(self.custom_schemes.iter().cloned());
         out
@@ -115,16 +107,7 @@ impl Theming {
             .unwrap_or_else(|| self.builtin_themes[0].clone())
     }
 
-    /// The bar scheme as it is painted: the chosen one, with up and down the
-    /// way round the convention says. Everything that draws asks this, which
-    /// is what makes the convention one switch rather than one per painter.
     pub fn bar_scheme(&self) -> BarScheme {
-        self.convention.apply(self.chosen_bar_scheme())
-    }
-
-    /// The bar scheme as it is stored, for copying it. What is painted is
-    /// [`Theming::bar_scheme`].
-    pub fn chosen_bar_scheme(&self) -> BarScheme {
         let schemes = self.bar_schemes();
         schemes
             .iter()
@@ -139,15 +122,6 @@ impl Theming {
 
     pub fn scheme_id(&self) -> &str {
         &self.scheme_id
-    }
-
-    pub fn convention(&self) -> Convention {
-        self.convention
-    }
-
-    pub fn select_convention(&mut self, convention: Convention, store: &Store) {
-        self.convention = convention;
-        store.set_setting(SETTING_CONVENTION, convention.key());
     }
 
     pub fn select_theme(&mut self, id: &str, store: &Store) {
@@ -165,8 +139,8 @@ impl Theming {
         self.custom_schemes = store.custom_bar_schemes();
     }
 
-    /// Re-read which theme, bar scheme and convention are chosen, for a
-    /// choice made outside this process.
+    /// Re-read which theme and bar scheme are chosen, for a choice made
+    /// outside this process.
     ///
     /// A command from a terminal writes the setting and nothing else; the
     /// window is still wearing whatever it started in, and would write its own
@@ -176,7 +150,6 @@ impl Theming {
         self.theme_id = store.setting(SETTING_THEME).unwrap_or_else(|| default_theme.to_string());
         self.scheme_id =
             store.setting(SETTING_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string());
-        self.convention = convention(store);
         self.reload_custom(store);
     }
 
@@ -696,33 +669,5 @@ mod tests {
         let schemes = theming.bar_schemes();
         assert_eq!(schemes[0].id, THEME_BARS_ID);
         assert!(schemes.len() > 4);
-    }
-
-    /// The painted scheme is the one every painter reads, so this is the whole
-    /// of the convention: candles, volume and the change colours in the
-    /// stylesheet all come from it.
-    #[test]
-    fn red_up_paints_the_chosen_scheme_the_other_way_round() {
-        let store = Store::memory().unwrap();
-        let mut theming = Theming::load(&store);
-        let chosen = theming.chosen_bar_scheme();
-        assert_eq!(theming.bar_scheme(), chosen);
-
-        theming.select_convention(Convention::RedUp, &store);
-        assert_eq!(theming.bar_scheme().up, chosen.down);
-        assert_eq!(theming.chosen_bar_scheme(), chosen);
-        let css = stylesheet(&theming.theme(), &theming.bar_scheme());
-        assert!(css.contains(&format!("@define-color omacharts_up {};", chosen.down)));
-
-        // And it survives being read back, the way a window adopts a choice
-        // made from a terminal.
-        assert_eq!(Theming::load(&store).bar_scheme().up, chosen.down);
-    }
-
-    #[test]
-    fn an_unreadable_convention_is_green_up() {
-        let store = Store::memory().unwrap();
-        store.set_setting(SETTING_CONVENTION, "sideways");
-        assert_eq!(convention(&store), Convention::GreenUp);
     }
 }

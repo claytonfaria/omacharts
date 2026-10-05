@@ -28,6 +28,6 @@ pub use session::Session;
 pub use symbols::{Instrument, InstrumentKind, SearchHit, SearchIndex};
 pub use frame::Frame;
 pub use theme::{
-    theme_bars, BarScheme, BarSlot, ColorChoice, Convention, Direction, Mode, Source, Swatch, Theme,
+    theme_bars, BarScheme, BarSlot, ColorChoice, Direction, Mode, Source, Swatch, Theme,
     UiColors, UiSlot,
 };

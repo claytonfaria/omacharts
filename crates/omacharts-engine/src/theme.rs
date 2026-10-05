@@ -409,61 +409,6 @@ impl BarScheme {
     }
 }
 
-/// Which of a scheme's two colours means up.
-///
-/// Green for up is a Western habit, not a fact. Taiwan, mainland China, Japan
-/// and Korea read it the other way round — red is a rise, green a fall — and a
-/// chart that disagrees with every other screen somebody trades from is a
-/// chart they misread.
-///
-/// It is applied to the scheme as a whole, once, rather than asked about by
-/// whatever paints: every candle, volume bar and change label already takes
-/// its colour from a [`BarScheme`], so handing them the swapped scheme moves
-/// all of them and nothing has to know there was a choice. A custom scheme
-/// swaps too — its "up" is the colour somebody picked for up, and this is a
-/// preference about which way up reads, not about one palette.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Convention {
-    #[default]
-    GreenUp,
-    RedUp,
-}
-
-impl Convention {
-    pub const ALL: [Convention; 2] = [Convention::GreenUp, Convention::RedUp];
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Convention::GreenUp => "green-up",
-            Convention::RedUp => "red-up",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Convention> {
-        Convention::ALL.into_iter().find(|c| c.key() == key)
-    }
-
-    /// The scheme as this convention paints it.
-    ///
-    /// Swapping is its own inverse, so the same call turns a painted scheme
-    /// back into the one that is stored — which is what an editor showing the
-    /// painted colours has to do before it saves one.
-    pub fn apply(self, scheme: BarScheme) -> BarScheme {
-        match self {
-            Convention::GreenUp => scheme,
-            Convention::RedUp => BarScheme {
-                up: scheme.down,
-                up_fill: scheme.down_fill,
-                down: scheme.up,
-                down_fill: scheme.up_fill,
-                volume_up: scheme.volume_down,
-                volume_down: scheme.volume_up,
-                ..scheme
-            },
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BarSlot {
     Up,
@@ -545,6 +490,8 @@ pub const OMARCHY_ID: &str = "omarchy";
 pub const THEME_BARS_ID: &str = "theme";
 /// The same, with the direction colours spent: one neutral for every bar.
 pub const THEME_MONO_ID: &str = "theme-mono";
+/// The same, the other way round: red for a rise, green for a fall.
+pub const THEME_RED_UP_ID: &str = "theme-red-up";
 /// Fallback theme when Omarchy is not installed.
 pub const FALLBACK_THEME_ID: &str = "midnight";
 
@@ -770,6 +717,30 @@ fn set_apart(
         }
     }
     colour.to_string()
+}
+
+/// The theme's own bar colours with up and down exchanged.
+///
+/// Green for a rise is a Western habit, not a fact. Taiwan, mainland China,
+/// Japan and Korea read a chart the other way round — red is up, green is
+/// down — and a chart that disagrees with every other screen somebody trades
+/// from is one they misread. Built from the theme like [`theme_bars`], so it
+/// follows the desktop theme the same way, and it is a scheme rather than a
+/// switch laid over every scheme: what the scheme list previews is what the
+/// chart paints.
+pub fn theme_red_up_bars(theme: &Theme) -> BarScheme {
+    let bars = theme_bars(theme);
+    BarScheme {
+        id: THEME_RED_UP_ID.to_string(),
+        name: "Red up".to_string(),
+        up: bars.down.clone(),
+        up_fill: bars.down_fill.clone(),
+        down: bars.up.clone(),
+        down_fill: bars.up_fill.clone(),
+        volume_up: bars.volume_down.clone(),
+        volume_down: bars.volume_up.clone(),
+        ..bars
+    }
 }
 
 /// Candles in one neutral colour, for people who would rather read a chart
@@ -1188,25 +1159,6 @@ mod tests {
         }
     }
 
-    /// Red-up hands every direction the other one's colours — candles,
-    /// bodies and volume alike — leaves the unchanged colour where it was, and
-    /// undoes itself, which is what lets an editor save what it shows.
-    #[test]
-    fn red_up_swaps_every_direction_colour_and_nothing_else() {
-        let green = theme_bars(&midnight());
-        let red = Convention::RedUp.apply(green.clone());
-        for direction in [Direction::Up, Direction::Down] {
-            let other = if direction == Direction::Up { Direction::Down } else { Direction::Up };
-            assert_eq!(red.outline(direction), green.outline(other));
-            assert_eq!(red.body(direction), green.body(other));
-            assert_eq!(red.volume(direction), green.volume(other));
-        }
-        assert_eq!(red.outline(Direction::Flat), green.outline(Direction::Flat));
-        assert_eq!(red.id, green.id);
-        assert_eq!(Convention::RedUp.apply(red), green);
-        assert_eq!(Convention::GreenUp.apply(green.clone()), green);
-    }
-
     #[test]
     fn a_swatch_choice_follows_the_theme() {
         let choice = ColorChoice::swatch("Amber");
@@ -1364,6 +1316,18 @@ mod tests {
         assert_eq!(bars.up, theme.swatch("Green").unwrap().hex);
         assert_eq!(bars.down, theme.swatch("Rose").unwrap().hex);
         assert_eq!(bars.id, THEME_BARS_ID);
+    }
+
+    #[test]
+    fn red_up_is_the_theme_colours_the_other_way_round() {
+        for theme in builtin_themes() {
+            let (green, red) = (theme_bars(&theme), theme_red_up_bars(&theme));
+            assert_eq!((&red.up, &red.down), (&green.down, &green.up), "{}", theme.name);
+            assert_eq!((&red.up_fill, &red.down_fill), (&green.down_fill, &green.up_fill));
+            assert_eq!((&red.volume_up, &red.volume_down), (&green.volume_down, &green.volume_up));
+            assert_eq!(red.neutral, green.neutral, "unchanged stays unchanged");
+            assert_eq!(red.id, THEME_RED_UP_ID);
+        }
     }
 
     #[test]

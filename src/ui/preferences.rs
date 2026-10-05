@@ -15,8 +15,8 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use omacharts_engine::theme::{
-    BarScheme, BarSlot, Convention, Source, Theme, UiSlot, FALLBACK_THEME_ID, OMARCHY_ID, SWATCH_NAMES,
-    THEME_BARS_ID, THEME_MONO_ID,
+    BarScheme, BarSlot, Source, Theme, UiSlot, FALLBACK_THEME_ID, OMARCHY_ID, SWATCH_NAMES,
+    THEME_BARS_ID, THEME_MONO_ID, THEME_RED_UP_ID,
 };
 
 use crate::cache;
@@ -217,12 +217,10 @@ fn bars_group(context: &Rc<Context>) -> adw::PreferencesGroup {
         .collect();
     let selected = ids.iter().position(|id| id == theming.scheme_id()).unwrap_or(0);
     let source = theming.bar_scheme().source;
-    let monochrome = theming.scheme_id() == THEME_MONO_ID;
-    let convention = theming.convention();
+    let scheme_id = theming.scheme_id().to_string();
     drop(theming);
 
-    group.add(&colouring_row(context, monochrome));
-    group.add(&convention_row(context, convention));
+    group.add(&colouring_row(context, &scheme_id));
 
     let row = adw::ComboRow::new();
     row.set_title("Bar scheme");
@@ -251,62 +249,53 @@ fn bars_group(context: &Rc<Context>) -> adw::PreferencesGroup {
 /// they had spent time picking.
 const SETTING_COLOURED_BARS: &str = "coloured_bar_scheme";
 
-/// Colour or no colour, said in those terms.
+/// Colour or no colour, and which way round, said in those terms.
 ///
-/// The scheme list below can already express this — monochrome is one of its
-/// entries — but only if you know that is what you are looking for. This is
-/// the question people actually arrive with, so it is asked plainly and the
-/// list is left to the people who want to choose a palette.
-fn colouring_row(context: &Rc<Context>, monochrome: bool) -> adw::ComboRow {
+/// The scheme list below can already express this — red-up and monochrome are
+/// two of its entries — but only if you know that is what you are looking
+/// for. This is the question people actually arrive with, so it is asked
+/// plainly and the list is left to the people who want to choose a palette.
+///
+/// Red-up is for Taiwan, mainland China, Japan and Korea, where a rise is red
+/// and a fall green.
+fn colouring_row(context: &Rc<Context>, scheme_id: &str) -> adw::ComboRow {
+    // The answer at each position, and the scheme it selects. The first is
+    // whichever coloured scheme was in use before, so it is looked up rather
+    // than fixed.
+    const SPECIAL: [&str; 2] = [THEME_RED_UP_ID, THEME_MONO_ID];
     let row = adw::ComboRow::new();
     row.set_title("Bar colours");
-    // No subtitle: the two answers are "Up and down" and "Monochrome", which
-    // say what they do, and a sentence beside them squeezed the list down to
-    // an ellipsis — the one part of the row that had to be readable.
-    row.set_model(Some(&string_list(&["Up and down".to_string(), "Monochrome".to_string()])));
-    row.set_selected(u32::from(monochrome));
+    // No subtitle: the answers say what they do, and a sentence beside them
+    // squeezed the list down to an ellipsis — the one part of the row that
+    // had to be readable.
+    row.set_model(Some(&string_list(&[
+        "Up and down".to_string(),
+        "Red up".to_string(),
+        "Monochrome".to_string(),
+    ])));
+    row.set_selected(SPECIAL.iter().position(|id| *id == scheme_id).map_or(0, |i| i as u32 + 1));
 
     let ctx = context.clone();
     row.connect_selected_notify(move |row| {
-        let wants_mono = row.selected() == 1;
         {
             let mut theming = ctx.theming.borrow_mut();
-            if (theming.scheme_id() == THEME_MONO_ID) == wants_mono {
-                return;
-            }
-            if wants_mono {
-                ctx.store.set_setting(SETTING_COLOURED_BARS, theming.scheme_id());
-                theming.select_bar_scheme(THEME_MONO_ID, &ctx.store);
-            } else {
-                let back = ctx
+            let current = theming.scheme_id().to_string();
+            let wanted = match SPECIAL.get((row.selected() as usize).wrapping_sub(1)) {
+                Some(id) => id.to_string(),
+                None => ctx
                     .store
                     .setting(SETTING_COLOURED_BARS)
-                    .unwrap_or_else(|| THEME_BARS_ID.to_string());
-                theming.select_bar_scheme(&back, &ctx.store);
+                    .unwrap_or_else(|| THEME_BARS_ID.to_string()),
+            };
+            if wanted == current {
+                return;
             }
+            // Leaving a palette somebody picked: remember it to come back to.
+            if !SPECIAL.contains(&current.as_str()) {
+                ctx.store.set_setting(SETTING_COLOURED_BARS, &current);
+            }
+            theming.select_bar_scheme(&wanted, &ctx.store);
         }
-        apply(&ctx);
-        rebuild(&ctx);
-    });
-    row
-}
-
-/// Which colour a rise is painted in.
-///
-/// Asked as the colour of a rising bar because that is how the habit is
-/// described by the people who have it: in Taipei and Tokyo red is up. With a
-/// scheme that is not green and red — the accessible one, a custom one — "Red"
-/// still means what it does there: the scheme's two directions, swapped.
-fn convention_row(context: &Rc<Context>, convention: Convention) -> adw::ComboRow {
-    let row = adw::ComboRow::new();
-    row.set_title("Rising bars");
-    row.set_model(Some(&string_list(&["Green".to_string(), "Red".to_string()])));
-    row.set_selected(u32::from(convention == Convention::RedUp));
-
-    let ctx = context.clone();
-    row.connect_selected_notify(move |row| {
-        let Some(&chosen) = Convention::ALL.get(row.selected() as usize) else { return };
-        ctx.theming.borrow_mut().select_convention(chosen, &ctx.store);
         apply(&ctx);
         rebuild(&ctx);
     });
@@ -380,9 +369,7 @@ fn duplicate_row(context: &Rc<Context>, source: Source, is_theme: bool) -> adw::
                 theming.reload_custom(&ctx.store);
                 theming.select_theme(&id, &ctx.store);
             } else {
-                // As stored, not as painted: a copy taken the painted way
-                // round would be swapped a second time the moment it was drawn.
-                let base = theming.chosen_bar_scheme();
+                let base = theming.bar_scheme();
                 let (id, name) = unique_name(
                     &base.name,
                     &theming.bar_schemes().iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
@@ -493,17 +480,12 @@ fn bar_colors_group(context: &Rc<Context>, group_name: &str) -> adw::Preferences
                 (rgba.blue() * 255.0).round() as u8,
                 (rgba.alpha() * 255.0).round() as u8,
             );
-            // The buttons show the scheme as painted, so "Up outline" is the
-            // colour up actually is; the edit is made there and turned back
-            // the stored way round before it is saved.
-            let theming = ctx.theming.borrow();
-            let mut scheme = theming.bar_scheme();
+            let mut scheme = ctx.theming.borrow().bar_scheme();
             if !scheme.source.is_editable() {
                 return;
             }
             BarSlot::set(slot, &mut scheme, hex);
-            ctx.store.save_bar_scheme(&theming.convention().apply(scheme));
-            drop(theming);
+            ctx.store.save_bar_scheme(&scheme);
             ctx.theming.borrow_mut().reload_custom(&ctx.store);
             apply(&ctx);
         });

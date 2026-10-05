@@ -12,7 +12,9 @@
 use serde_json::{json, Value};
 
 use omacharts_engine::indicators::{LineStyle, Stroke, MAX_PANE_SHARE, MIN_PANE_SHARE};
-use omacharts_engine::theme::{ColorChoice, SWATCH_NAMES, THEME_BARS_ID, THEME_MONO_ID};
+use omacharts_engine::theme::{
+    ColorChoice, SWATCH_NAMES, THEME_BARS_ID, THEME_MONO_ID, THEME_RED_UP_ID,
+};
 use omacharts_engine::{
     link, BarStyle, Indicator, IndicatorKind, LinkGroup, Reset, Session, Timeframe,
 };
@@ -135,9 +137,8 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("config", "list") => config_list(store, json),
         ("config", "get") => config_get(store, m, json),
         ("config", "set") => config_set(store, m, json),
-        ("config", "bars") => config_bars(store, m, json),
+        ("config", "bars") => config_bars(store, m, json, live),
         ("config", "refresh") => config_refresh(store, m, json),
-        ("config", "direction") => config_direction(store, m, json, live),
 
         ("plugin", "status") => plugin_status(json),
         ("plugin", "install") => plugin_install(json),
@@ -1961,78 +1962,58 @@ fn config_refresh(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<
 /// colour back lands on the default rather than on the scheme that was in use.
 /// This is the question the preferences dialog asks, so the terminal asks it
 /// too.
-fn config_bars(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let current =
-        store.setting(crate::theming::SETTING_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string());
-    let mono = current == THEME_MONO_ID;
-    let Some(state) = arg(m, "STATE") else {
-        return match as_json {
-            true => Ok(format!("{}\n", json!({"bars": spell_bars(mono), "scheme": current}))),
-            false => Ok(format!("{}\n", spell_bars(mono))),
-        };
-    };
-
-    let wants_mono = state == "monochrome";
-    let scheme = match (wants_mono, mono) {
-        (true, false) => {
-            store.set_setting(COLOURED_BARS, &current);
-            THEME_MONO_ID.to_string()
-        }
-        (false, true) => store.setting(COLOURED_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string()),
-        // Already there. Said rather than silently done, because "it was
-        // already monochrome" and "it is monochrome now" are different
-        // answers to somebody checking their own work.
-        _ => current.clone(),
-    };
-    store.set_setting(crate::theming::SETTING_BARS, &scheme);
-    let text = match (wants_mono, mono) {
-        (true, false) => "bars are monochrome; the colours are remembered".to_string(),
-        (false, true) => format!("bars carry their direction again, in the {scheme:?} scheme"),
-        _ => format!("bars were already {}", spell_bars(mono)),
-    };
-    said(as_json, json!({"bars": spell_bars(wants_mono), "scheme": scheme}), text)
-}
-
-/// Which colour a rise is painted in: green, or red the way Taiwan, China,
-/// Japan and Korea read a chart.
-///
-/// The key and its reader are `Theming`'s own, so the window and this command
-/// cannot spell it differently. The window is told to repaint because nothing
-/// else would make it: it paints from the convention it read when it started,
-/// and a candle has no row to reload.
-fn config_direction(
+fn config_bars(
     store: &Store,
     m: &clap::ArgMatches,
     as_json: bool,
     live: Option<&dyn Live>,
 ) -> Result<String, Fault> {
-    use crate::theming::{convention, SETTING_CONVENTION};
-    use omacharts_engine::Convention;
-    let Some(key) = arg(m, "CONVENTION") else {
-        let key = convention(store).key();
+    let current =
+        store.setting(crate::theming::SETTING_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string());
+    let Some(state) = arg(m, "STATE") else {
         return match as_json {
-            true => Ok(format!("{}\n", json!({"direction": key}))),
-            false => Ok(format!("{key}\n")),
+            true => Ok(format!("{}\n", json!({"bars": spell_bars(&current), "scheme": current}))),
+            false => Ok(format!("{}\n", spell_bars(&current))),
         };
     };
-    let Some(chosen) = Convention::from_key(key) else {
-        return Err(Fault::usage(format!("no such convention: {key}")));
+    let state = state.as_str();
+
+    let scheme = match state {
+        "monochrome" => THEME_MONO_ID.to_string(),
+        "red-up" => THEME_RED_UP_ID.to_string(),
+        _ if spell_bars(&current) != "coloured" => {
+            store.setting(COLOURED_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string())
+        }
+        _ => current.clone(),
     };
-    store.set_setting(SETTING_CONVENTION, chosen.key());
+    // Leaving a palette somebody picked: remember it to come back to.
+    if scheme != current && spell_bars(&current) == "coloured" {
+        store.set_setting(COLOURED_BARS, &current);
+    }
+    store.set_setting(crate::theming::SETTING_BARS, &scheme);
+    // A candle has no row to reload: an open window paints from the scheme it
+    // read, so it is told to read it again.
     if let Some(live) = live {
         live.adopt_theming();
     }
-    let text = match chosen {
-        Convention::GreenUp => "rising bars are green, falling bars red",
-        Convention::RedUp => "rising bars are red, falling bars green",
+    let text = match (state, scheme == current) {
+        // Said rather than silently done, because "it was already monochrome"
+        // and "it is monochrome now" are different answers to somebody
+        // checking their own work.
+        (_, true) => format!("bars were already {state}"),
+        ("monochrome", _) => "bars are monochrome; the colours are remembered".to_string(),
+        ("red-up", _) => "rising bars are red and falling bars green".to_string(),
+        _ => format!("bars carry their direction again, in the {scheme:?} scheme"),
     };
-    said(as_json, json!({"direction": chosen.key()}), text.to_string())
+    said(as_json, json!({"bars": state, "scheme": scheme}), text)
 }
 
-fn spell_bars(mono: bool) -> &'static str {
-    match mono {
-        true => "monochrome",
-        false => "coloured",
+/// Which of the three answers a scheme is.
+fn spell_bars(scheme: &str) -> &'static str {
+    match scheme {
+        THEME_MONO_ID => "monochrome",
+        THEME_RED_UP_ID => "red-up",
+        _ => "coloured",
     }
 }
 
@@ -2768,6 +2749,21 @@ mod tests {
     }
 
     #[test]
+    fn bars_can_turn_red_up_and_get_the_same_scheme_back() {
+        let store = Store::memory().unwrap();
+        run("config set bar_scheme hollow", &store);
+        assert_eq!(run("config bars red-up", &store).code, 0);
+        assert_eq!(run("config bars", &store).out.trim(), "red-up");
+        assert_eq!(run("config get bar_scheme", &store).out.trim(), "theme-red-up");
+
+        // From one of the two answers to the other, and back: the palette
+        // remembered is still the one somebody picked.
+        assert_eq!(run("config bars monochrome", &store).code, 0);
+        assert_eq!(run("config bars coloured", &store).code, 0);
+        assert_eq!(run("config get bar_scheme", &store).out.trim(), "hollow");
+    }
+
+    #[test]
     fn bars_can_lose_their_colour_and_get_the_same_scheme_back() {
         let store = Store::memory().unwrap();
         run("config set bar_scheme hollow", &store);
@@ -2783,28 +2779,6 @@ mod tests {
             "hollow",
             "the scheme that was in use has to come back, not the default"
         );
-    }
-
-    #[test]
-    fn the_direction_colours_can_be_read_set_and_refused() {
-        let store = Store::memory().unwrap();
-        assert_eq!(run("config direction", &store).out.trim(), "green-up");
-        assert_eq!(run("config direction red-up", &store).code, 0);
-        assert_eq!(run("config direction", &store).out.trim(), "red-up");
-        assert_eq!(run("config direction sideways", &store).code, super::super::EXIT_USAGE);
-        assert_eq!(run("config direction", &store).out.trim(), "red-up", "and left it alone");
-    }
-
-    /// The command writes and the window paints, so they have to agree on the
-    /// key. Written through the command and read back through `Theming`, which
-    /// is what a window adopting the change does.
-    #[test]
-    fn the_direction_a_command_sets_is_the_one_the_window_paints() {
-        let store = Store::memory().unwrap();
-        let green = crate::theming::Theming::load(&store).bar_scheme();
-        run("config direction red-up", &store);
-        let red = crate::theming::Theming::load(&store).bar_scheme();
-        assert_eq!((red.up, red.down), (green.down, green.up));
     }
 
     /// The preferences dialog remembers the coloured scheme under this key and
