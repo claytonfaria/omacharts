@@ -251,6 +251,9 @@ pub struct Watchlist {
 const NEW_SYMBOL_ACCEL: &str = "<Ctrl>n";
 const NEW_SECTION_ACCEL: &str = "<Ctrl><Shift>n";
 
+/// The largest file "Import file…" will read into the box.
+const MAX_IMPORT_BYTES: usize = 1 << 20;
+
 /// An accelerator in the desktop's own words — "Ctrl+N" here, something else
 /// on a machine set up differently. `shortcuts::label` does this from the
 /// table; these two keys are not in it.
@@ -386,6 +389,13 @@ impl Watchlist {
         let this = watchlist.clone();
         add_symbol.connect_clicked(move |_| this.add_symbol());
         actions.append(&add_symbol);
+
+        let add_list = gtk::Button::from_icon_name("edit-paste-symbolic");
+        add_list.set_tooltip_text(Some("Add symbols from a list"));
+        add_list.add_css_class("flat");
+        let this = watchlist.clone();
+        add_list.connect_clicked(move |_| this.add_list_to(this.section_for_new()));
+        actions.append(&add_list);
 
         let add_section = gtk::Button::from_icon_name("folder-new-symbolic");
         add_section.set_tooltip_text(Some("Add a section"));
@@ -1709,10 +1719,112 @@ impl Watchlist {
 
     /// Add a symbol beside the highlight: the rail's own New.
     pub fn add_symbol(self: &Rc<Self>) {
+        self.add_symbol_to(self.section_for_new());
+    }
+
+    /// Where something added from the rail lands: the section of the
+    /// highlighted row.
+    fn section_for_new(&self) -> i64 {
         let root = self.store.root_section(self.active.get());
         let selected = self.list.selected_row().map(|row| row.index().max(0) as usize);
         let sections: Vec<i64> = self.rows.borrow().iter().map(RowKind::section_id).collect();
-        self.add_symbol_to(section_for_new_symbol(&sections, selected, root));
+        section_for_new_symbol(&sections, selected, root)
+    }
+
+    /// Add a whole list at once: typed, pasted, or read from a file.
+    ///
+    /// The file is read into the box rather than straight into the
+    /// watchlist, so what is about to be added can be seen and trimmed
+    /// first — an export from somewhere else is rarely exactly the list
+    /// somebody wanted. The same reading of the text as `watchlist add`,
+    /// so a list that works in one works in the other.
+    fn add_list_to(self: &Rc<Self>, section_id: i64) {
+        let text = gtk::TextView::new();
+        text.set_wrap_mode(gtk::WrapMode::WordChar);
+        text.set_top_margin(8);
+        text.set_bottom_margin(8);
+        text.set_left_margin(8);
+        text.set_right_margin(8);
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_child(Some(&text));
+        scroller.set_min_content_height(160);
+        scroller.add_css_class("card");
+
+        let import = gtk::Button::with_label("Import file…");
+        import.set_halign(gtk::Align::Start);
+        let buffer = text.buffer();
+        let this = self.clone();
+        import.connect_clicked(move |_| this.import_into(&buffer));
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        content.append(&scroller);
+        content.append(&import);
+
+        let dialog = adw::AlertDialog::new(
+            Some("Add symbols"),
+            Some("Separate them with commas, spaces or new lines."),
+        );
+        dialog.set_extra_child(Some(&content));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("add", "Add");
+        dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("add"));
+        dialog.set_close_response("cancel");
+
+        // The box keeps Return for new lines, so the key that finishes is
+        // Ctrl+Enter, as in every dialog here. The binding has no emitter for
+        // the signal, so it is emitted by name and the dialog closed by hand.
+        let finishing = dialog.clone();
+        crate::ui::dialogs::commit_on_ctrl_enter(&dialog, move || {
+            finishing.emit_by_name::<()>("response", &[&"add"]);
+            finishing.close();
+        });
+
+        let this = self.clone();
+        let done = Cell::new(false);
+        dialog.connect_response(None, move |_, response| {
+            // A key press emits the response and then closes, and a close
+            // carries a response of its own behind it.
+            if response != "add" || done.replace(true) {
+                return;
+            }
+            let buffer = text.buffer();
+            let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+            let index = this.index.get();
+            let (found, unknown) = index.resolve_list(&typed, None);
+            this.add_all_to(section_id, &found);
+            if !unknown.is_empty() {
+                let body = format!("Added {}. Not found: {}.", found.len(), unknown.join(", "));
+                let told = adw::AlertDialog::new(Some("Some symbols were not added"), Some(&body));
+                told.add_response("ok", "OK");
+                told.present(Some(&this.widget));
+            }
+        });
+        dialog.present(Some(&self.widget));
+    }
+
+    /// Read a text file the person picks into the box.
+    fn import_into(&self, buffer: &gtk::TextBuffer) {
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Import symbols");
+        let buffer = buffer.clone();
+        let window = self.widget.root().and_downcast::<gtk::Window>();
+        dialog.open(window.as_ref(), None::<&gio::Cancellable>, move |picked| {
+            let Ok(file) = picked else {
+                return;
+            };
+            file.load_contents_async(None::<&gio::Cancellable>, move |loaded| {
+                // A list of tickers is kilobytes. Anything this size is the
+                // wrong file, and laying it out would freeze the window.
+                match loaded {
+                    Ok((bytes, _)) if bytes.len() <= MAX_IMPORT_BYTES => {
+                        buffer.set_text(&String::from_utf8_lossy(&bytes));
+                    }
+                    Ok(_) => buffer.set_text("# That file is too large to be a list of symbols."),
+                    Err(_) => {}
+                }
+            });
+        });
     }
 
     /// The same, for a key the window owns.
@@ -1741,24 +1853,38 @@ impl Watchlist {
             Some(section) if !section.root => format!("Add to {}", section.name),
             _ => "Add to watchlist".to_string(),
         };
-        let folded = section.map(|section| section.collapsed).unwrap_or(false);
         let this = self.clone();
         self.search.present(&self.widget, &title, move |instrument| {
-            this.store.add_to_section(section_id, &instrument.symbol, instrument.suffix.as_deref());
-            // Folded, the symbol arrives where nobody can watch it arrive,
-            // which reads as the add having quietly failed.
-            if folded {
-                this.store.set_section_collapsed(section_id, false);
-            }
-            this.changed();
-            // Land on what was just added. It goes to the end of its section,
-            // which on a full rail is below the fold.
-            if this.pick(&instrument)
-                && let Some(row) = this.list.selected_row()
-            {
-                row.grab_focus();
-            }
+            this.add_all_to(section_id, &[&instrument]);
         });
+    }
+
+    /// Put instruments at the end of a section and land on the last of them.
+    fn add_all_to(self: &Rc<Self>, section_id: i64, instruments: &[&Instrument]) {
+        let Some(last) = instruments.last() else {
+            return;
+        };
+        let entries: Vec<(&str, Option<&str>)> =
+            instruments.iter().map(|i| (i.symbol.as_str(), i.suffix.as_deref())).collect();
+        self.store.add_all_to_section(section_id, &entries);
+        // Folded, the symbols arrive where nobody can watch them arrive, which
+        // reads as the add having quietly failed.
+        let folded = self
+            .store
+            .watchlist_sections(self.active.get())
+            .into_iter()
+            .any(|s| s.id == section_id && s.collapsed);
+        if folded {
+            self.store.set_section_collapsed(section_id, false);
+        }
+        self.changed();
+        // Land on what was just added. It goes to the end of its section,
+        // which on a full rail is below the fold.
+        if self.pick(last)
+            && let Some(row) = self.list.selected_row()
+        {
+            row.grab_focus();
+        }
     }
 
     /// Anchored to whatever asked for it: the control at the foot of the rail

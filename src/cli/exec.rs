@@ -519,10 +519,10 @@ fn watchlist_add(
 ) -> Result<String, Fault> {
     let (id, name) = find_list(store, required(m, "LIST")?)?;
     let suffix = arg(m, "suffix").map(|s| s.to_uppercase());
-    let symbols: Vec<String> = m
-        .get_many::<String>("SYMBOL")
-        .map(|given| given.map(|s| s.to_uppercase()).collect())
-        .unwrap_or_default();
+    // Each argument may itself be a list — `"AAPL, MSFT"`, or a whole file
+    // passed as `"$(cat list.txt)"` — read the way the rail's paste box reads.
+    let symbols: Vec<String> =
+        m.get_many::<String>("SYMBOL").map(|given| given.cloned().collect()).unwrap_or_default();
     if symbols.is_empty() {
         return Err(Fault::usage("name at least one symbol".into()));
     }
@@ -533,19 +533,19 @@ fn watchlist_add(
     };
 
     let index = crate::inventory::everything();
-    let mut done: Vec<String> = Vec::new();
-    let mut unknown: Vec<String> = Vec::new();
-    for symbol in &symbols {
-        if index.find(symbol, suffix.as_deref()).is_none() {
-            unknown.push(spell(symbol, suffix.as_deref()));
-            continue;
+    let (found, unknown) = index.resolve_list(&symbols.join("\n"), suffix.as_deref());
+    let unknown: Vec<String> = unknown.iter().map(|t| spell(t, suffix.as_deref())).collect();
+    let entries: Vec<(&str, Option<&str>)> =
+        found.iter().map(|i| (i.symbol.as_str(), i.suffix.as_deref())).collect();
+    match adding {
+        true => store.add_all_to_section(section, &entries),
+        false => {
+            for (symbol, venue) in &entries {
+                store.remove_from_section(section, symbol, *venue);
+            }
         }
-        match adding {
-            true => store.add_to_section(section, symbol, suffix.as_deref()),
-            false => store.remove_from_section(section, symbol, suffix.as_deref()),
-        }
-        done.push(spell(symbol, suffix.as_deref()));
     }
+    let done: Vec<String> = found.iter().map(|i| i.display_symbol()).collect();
 
     if done.is_empty() {
         return Err(Fault::not_found(format!(
@@ -2446,6 +2446,23 @@ mod tests {
         let shown = run("watchlist show Semis --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&shown.out).unwrap();
         assert_eq!(parsed["sections"][0]["symbols"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_list_can_be_added_in_one_argument() {
+        let store = Store::memory().unwrap();
+        run("watchlist create Semis", &store);
+        // What `"$(cat semis.txt)"` hands over: one argument, a list inside it.
+        let out = run("watchlist add Semis NVDA,AMD,SAN.MC,NOTATICKER", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        assert!(out.out.contains("added 3"), "{}", out.out);
+        assert!(out.out.contains("NOTATICKER"), "the ones it skipped are named: {}", out.out);
+
+        let shown = run("watchlist show Semis --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&shown.out).unwrap();
+        let symbols = &parsed["sections"][0]["symbols"];
+        assert_eq!(symbols[2]["symbol"], "SAN", "a venue typed with a dot is stored apart");
+        assert_eq!(symbols[2]["suffix"], "MC");
     }
 
     #[test]

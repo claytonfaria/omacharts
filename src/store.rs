@@ -711,6 +711,18 @@ impl Store {
         );
     }
 
+    /// Several at once, in one transaction: a pasted list of five hundred is
+    /// one write rather than five hundred, and arrives whole or not at all.
+    pub fn add_all_to_section(&self, section_id: i64, entries: &[(&str, Option<&str>)]) {
+        let Ok(batch) = self.conn.unchecked_transaction() else {
+            return;
+        };
+        for (symbol, suffix) in entries {
+            self.add_to_section(section_id, symbol, *suffix);
+        }
+        let _ = batch.commit();
+    }
+
     pub fn remove_from_section(&self, section_id: i64, symbol: &str, suffix: Option<&str>) {
         let _ = self.conn.execute(
             "DELETE FROM watchlist_entries

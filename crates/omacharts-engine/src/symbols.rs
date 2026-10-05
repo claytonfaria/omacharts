@@ -209,6 +209,41 @@ impl SearchIndex {
             .find(|i| i.symbol == symbol && i.suffix.as_deref() == suffix)
     }
 
+    /// One ticker as somebody wrote it: `AAPL`, `SAP.DE`, `BRK.B`.
+    ///
+    /// Taken whole first, so a dot that is part of the ticker stays part of
+    /// it, and only then as a ticker and a venue suffix.
+    pub fn lookup(&self, ticker: &str) -> Option<&Instrument> {
+        self.find(ticker, None).or_else(|| {
+            let (symbol, suffix) = ticker.rsplit_once('.')?;
+            self.find(symbol, Some(suffix))
+        })
+    }
+
+    /// Every instrument a pasted list names, in the order it names them, and
+    /// the tickers it names that are not instruments.
+    ///
+    /// `venue` is the suffix for a ticker written without one, as
+    /// `watchlist add --suffix` gives it. See [`tickers`] for the text.
+    pub fn resolve_list(&self, text: &str, venue: Option<&str>) -> (Vec<&Instrument>, Vec<String>) {
+        let mut found: Vec<&Instrument> = Vec::new();
+        let mut unknown = Vec::new();
+        for ticker in tickers(text) {
+            let instrument = match venue {
+                Some(_) => self.find(&ticker, venue),
+                None => self.lookup(&ticker),
+            };
+            match instrument {
+                // Two spellings of one listing — SAN.MC and SAN --suffix MC —
+                // are still one row.
+                Some(instrument) if !found.contains(&instrument) => found.push(instrument),
+                Some(_) => {}
+                None => unknown.push(ticker),
+            }
+        }
+        (found, unknown)
+    }
+
     /// The curated majors, for an empty search field.
     pub fn featured(&self, limit: usize) -> Vec<SearchHit> {
         let mut hits: Vec<SearchHit> = self
@@ -342,6 +377,31 @@ impl SearchIndex {
         let by_name = nominal.map(|textual| textual + prior * 2);
         by_symbol.max(by_name)
     }
+}
+
+/// The tickers in a list somebody pasted or exported, upper-cased, each once.
+///
+/// Separated by commas, semicolons or any whitespace, so one per line, a
+/// spreadsheet column and `AAPL, MSFT` all read the same. A watchlist
+/// exported from another charting tool works as it is: a field starting with
+/// `#` is a `###Section` heading, names with spaces in them included, and an
+/// exchange prefix — `NASDAQ:AAPL` — keeps only the ticker. Quotes, which a
+/// CSV wraps fields in, are dropped.
+pub fn tickers(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for field in text.split([',', ';', '\n']) {
+        if field.trim_start().starts_with('#') {
+            continue;
+        }
+        for token in field.split_whitespace() {
+            let token = token.trim_matches('"');
+            let ticker = token.rsplit(':').next().unwrap_or(token).to_uppercase();
+            if !ticker.is_empty() && !out.contains(&ticker) {
+                out.push(ticker);
+            }
+        }
+    }
+    out
 }
 
 /// What a query that *is* the ticker, or *is* the name, scores before weights.
@@ -757,6 +817,42 @@ mod tests {
         // The Madrid listing must not answer a lookup for a US one.
         assert!(idx.find("SAN", None).is_none());
         assert!(idx.find("NOPE", None).is_none());
+    }
+
+    #[test]
+    fn a_pasted_list_reads_however_it_was_separated() {
+        assert_eq!(tickers("aapl, msft;NVDA\r\n  amd\tTSM  "), ["AAPL", "MSFT", "NVDA", "AMD", "TSM"]);
+        assert_eq!(tickers("\"AAPL\",\"MSFT\""), ["AAPL", "MSFT"], "a CSV column");
+        assert_eq!(tickers("AAPL, aapl, AAPL"), ["AAPL"], "each once");
+        assert!(tickers(" , ;\n").is_empty());
+    }
+
+    /// A watchlist export of the common shape: one line, exchange-prefixed,
+    /// with its sections as `###` markers between the symbols.
+    #[test]
+    fn an_exported_watchlist_reads_as_its_tickers() {
+        let export = "###Mega caps,NASDAQ:AAPL,NASDAQ:MSFT,###Banks,NYSE:JPM";
+        assert_eq!(tickers(export), ["AAPL", "MSFT", "JPM"], "a section name is not a ticker");
+    }
+
+    #[test]
+    fn a_list_resolves_to_instruments_and_says_what_it_could_not() {
+        let idx = index();
+        let (found, unknown) = idx.resolve_list("AAPL, SAN.MC, NOTATICKER, aapl, ES", None);
+        let found: Vec<String> = found.iter().map(|i| i.display_symbol()).collect();
+        assert_eq!(found, ["AAPL", "SAN.MC", "ES"], "in the order given, each once");
+        assert_eq!(unknown, ["NOTATICKER"]);
+
+        let (found, _) = idx.resolve_list("SAN", Some("MC"));
+        assert_eq!(found[0].display_symbol(), "SAN.MC", "a venue for tickers given without one");
+    }
+
+    #[test]
+    fn a_dot_is_part_of_the_ticker_before_it_is_a_venue() {
+        let idx = index();
+        assert_eq!(idx.lookup("FTSEMIB.MI").map(|i| i.symbol.as_str()), Some("FTSEMIB.MI"));
+        assert_eq!(idx.lookup("SAN.MC").map(|i| i.display_symbol()).as_deref(), Some("SAN.MC"));
+        assert!(idx.lookup("SAN.XX").is_none());
     }
 
     #[test]

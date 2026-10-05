@@ -243,6 +243,17 @@ Semis
   [exit 0]
 ```
 
+Any argument can itself be a list, separated by commas, semicolons, spaces or
+new lines, so a file of tickers goes in as one argument. A watchlist exported
+from another charting tool works as it is: exchange prefixes such as
+`NASDAQ:` are dropped, and `###` section headings are skipped. The rail's "Add symbols from a list" box reads text the
+same way.
+
+```
+$ omacharts watchlist add Semis "$(cat semis.txt)"
+$ omacharts watchlist add Semis "QCOM, INTC, NASDAQ:ARM"
+```
+
 Did not know the tickers? Search for them first:
 
 ```

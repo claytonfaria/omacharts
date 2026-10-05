@@ -240,7 +240,13 @@ pub const SURFACE: &[Noun] = &[
             Verb {
                 name: "add",
                 about: "Put symbols in a watchlist",
-                args: &[Arg::req("LIST", SELECTOR), Arg::many("SYMBOL", "one or more tickers")],
+                args: &[
+                    Arg::req("LIST", SELECTOR),
+                    Arg::many(
+                        "SYMBOL",
+                        "one or more tickers, each of which may be a list: \"AAPL, MSFT\", or a file as \"$(cat list.txt)\"",
+                    ),
+                ],
                 flags: &[
                     Flag::valued("section", "NAME", "put them in this section rather than at the top"),
                     Flag::valued("suffix", "S", "venue suffix, applied to every symbol given"),
