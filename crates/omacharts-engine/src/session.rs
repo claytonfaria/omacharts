@@ -159,11 +159,6 @@ pub fn filter(bars: &[Bar], session: Session, instrument: &Instrument, intraday:
     bars.iter().copied().filter(|bar| market.open(market.regular, bar.ts)).collect()
 }
 
-/// Is this instant inside the New York cash session on a weekday?
-pub fn in_regular_hours(ts: i64) -> bool {
-    NEW_YORK.open(NEW_YORK.regular, ts)
-}
-
 /// Could another bar still arrive for this instrument at `ts`?
 ///
 /// The question a chart left open has to answer before fetching itself again.
@@ -214,6 +209,11 @@ mod tests {
     use chrono_tz::Asia::Tokyo;
 
     use super::*;
+
+    /// Is this instant inside the New York cash session on a weekday?
+    fn in_regular_hours(ts: i64) -> bool {
+        NEW_YORK.open(NEW_YORK.regular, ts)
+    }
 
     fn instrument(kind: InstrumentKind, suffix: Option<&str>) -> Instrument {
         Instrument {
