@@ -243,10 +243,10 @@ fn bars_group(context: &Rc<Context>) -> adw::PreferencesGroup {
 
 /// Which scheme to go back to when the colour is put back.
 ///
-/// Monochrome is a scheme like any other, so choosing it would otherwise
-/// throw away whatever was selected before — and somebody trying it out and
-/// changing their mind would land on the default rather than on the palette
-/// they had spent time picking.
+/// Red up and Monochrome are schemes like any other, so choosing one would
+/// otherwise throw away whatever was selected before — and somebody trying it
+/// out and changing their mind would land on the default rather than on the
+/// palette they had spent time picking.
 const SETTING_COLOURED_BARS: &str = "coloured_bar_scheme";
 
 /// Colour or no colour, and which way round, said in those terms.
@@ -259,9 +259,9 @@ const SETTING_COLOURED_BARS: &str = "coloured_bar_scheme";
 /// Red-up is for Taiwan, mainland China, Japan and Korea, where a rise is red
 /// and a fall green.
 fn colouring_row(context: &Rc<Context>, scheme_id: &str) -> adw::ComboRow {
-    // The answer at each position, and the scheme it selects. The first is
-    // whichever coloured scheme was in use before, so it is looked up rather
-    // than fixed.
+    // The scheme behind every answer but the first, in the order they are
+    // listed. The first answer is whichever coloured scheme was in use
+    // before, which has to be looked up rather than named here.
     const SPECIAL: [&str; 2] = [THEME_RED_UP_ID, THEME_MONO_ID];
     let row = adw::ComboRow::new();
     row.set_title("Bar colours");
@@ -280,7 +280,8 @@ fn colouring_row(context: &Rc<Context>, scheme_id: &str) -> adw::ComboRow {
         {
             let mut theming = ctx.theming.borrow_mut();
             let current = theming.scheme_id().to_string();
-            let wanted = match SPECIAL.get((row.selected() as usize).wrapping_sub(1)) {
+            let chosen = row.selected().checked_sub(1).and_then(|i| SPECIAL.get(i as usize));
+            let wanted = match chosen {
                 Some(id) => id.to_string(),
                 None => ctx
                     .store

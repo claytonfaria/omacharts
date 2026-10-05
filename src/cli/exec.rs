@@ -1955,7 +1955,8 @@ fn config_refresh(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<
     said(as_json, json!({"autoRefresh": on}), format!("automatic chart refreshing is {state}"))
 }
 
-/// Colour or no colour, asked the way people arrive at it.
+/// Colour or no colour, and which way round, asked the way people arrive at
+/// it.
 ///
 /// `config set bar_scheme theme-mono` reaches the same scheme, and is not the
 /// same command: it does not remember what to go back to, so putting the
@@ -1981,10 +1982,10 @@ fn config_bars(
     let scheme = match state {
         "monochrome" => THEME_MONO_ID.to_string(),
         "red-up" => THEME_RED_UP_ID.to_string(),
-        _ if spell_bars(&current) != "coloured" => {
-            store.setting(COLOURED_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string())
-        }
-        _ => current.clone(),
+        // "coloured": stay on the palette in use if it already carries the
+        // direction, and otherwise go back to the one it was left from.
+        _ if spell_bars(&current) == "coloured" => current.clone(),
+        _ => store.setting(COLOURED_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string()),
     };
     // Leaving a palette somebody picked: remember it to come back to.
     if scheme != current && spell_bars(&current) == "coloured" {
