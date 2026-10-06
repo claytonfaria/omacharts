@@ -20,11 +20,16 @@ use omacharts_engine::{
 };
 
 use super::charts::{self, Workspace};
-use super::{parser, Fault, Live, Outcome, EXIT_USAGE};
+use super::{parser, Caller, Fault, Live, Outcome, EXIT_USAGE};
 use crate::store::{Entry, Section, Store, DEFAULT_WATCHLIST};
 
 /// Parse and run.
-pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outcome {
+pub fn dispatch(
+    args: &[String],
+    store: &Store,
+    live: Option<&dyn Live>,
+    caller: &dyn Caller,
+) -> Outcome {
     // `omacharts watchlist [--refresh]` was the whole command line once, and
     // it is what the bar widget installed on people's desktops still runs on a
     // timer. `watchlist` grew subcommands around it; this keeps the bare form
@@ -106,6 +111,8 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("watchlist", "move") => watchlist_move(store, m, json),
         ("watchlist", "link") => watchlist_link(store, m, json),
         ("watchlist", "feed") => Ok(super::watchlist_json(store, flag(m, "refresh"), live)),
+        ("watchlist", "export") => watchlist_export(store, m),
+        ("watchlist", "import") => watchlist_import(store, m, json, caller),
 
         ("section", "list") => section_list(store, m, json),
         ("section", "create") => section_create(store, m, json),
@@ -483,6 +490,49 @@ fn sections_json(sections: &[Section]) -> Value {
             })
             .collect(),
     )
+}
+
+/// Every watchlist, or the ones named, as a file `watchlist import` reads.
+fn watchlist_export(store: &Store, m: &clap::ArgMatches) -> Result<String, Fault> {
+    let lists = match m.get_many::<String>("LIST") {
+        None => store.watchlists(),
+        Some(named) => named.map(|selector| find_list(store, selector)).collect::<Result<_, _>>()?,
+    };
+    let file = super::transfer::export(store, &lists, |id| link_group_of(store, id));
+    let text = serde_json::to_string_pretty(&file)
+        .map_err(|error| Fault::new(super::EXIT_ERROR, error.to_string()))?;
+    Ok(format!("{text}\n"))
+}
+
+/// Bring in a file from `watchlist export`, adding what is missing.
+fn watchlist_import(
+    store: &Store,
+    m: &clap::ArgMatches,
+    as_json: bool,
+    caller: &dyn Caller,
+) -> Result<String, Fault> {
+    let file = super::transfer::parse(&caller.read(required(m, "FILE")?)?)?;
+    let imported = super::transfer::import(store, &file, flag(m, "replace"), link_setting)?;
+    if as_json {
+        let rows = imported
+            .iter()
+            .map(|done| {
+                json!({
+                    "name": done.name,
+                    "action": done.action,
+                    "symbols": done.symbols,
+                    "sections": done.sections,
+                    "linkKeptBy": done.link_kept_by.as_ref().map(|(_, holder)| holder),
+                })
+                .to_string()
+            })
+            .collect();
+        return Ok(wrap_list("watchlists", rows));
+    }
+    match imported.is_empty() {
+        true => Ok("the file holds no watchlists\n".to_string()),
+        false => Ok(imported.iter().map(|done| done.describe() + "\n").collect()),
+    }
 }
 
 fn watchlist_create(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
@@ -2267,7 +2317,115 @@ mod tests {
     fn run(line: &str, store: &Store) -> Outcome {
         let args: Vec<String> =
             std::iter::once("omacharts".to_string()).chain(line.split_whitespace().map(String::from)).collect();
-        dispatch(&args, store, None)
+        dispatch(&args, store, None, &super::super::Here)
+    }
+
+    /// A caller who piped this text in, whatever path they named.
+    struct Piped(String);
+
+    impl Caller for Piped {
+        fn read(&self, _path: &str) -> Result<String, Fault> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn import(file: &str, flags: &str, store: &Store) -> Outcome {
+        let args: Vec<String> = ["omacharts", "watchlist", "import", "-"]
+            .into_iter()
+            .map(String::from)
+            .chain(flags.split_whitespace().map(String::from))
+            .collect();
+        dispatch(&args, store, None, &Piped(file.to_string()))
+    }
+
+    /// A machine with a bit of everything an export has to carry.
+    fn exporting() -> Store {
+        let store = Store::memory().unwrap();
+        run("watchlist add Default SPY QQQ", &store);
+        run("watchlist rename Default Mine", &store);
+        run("watchlist create Semis", &store);
+        run("watchlist add Semis NVDA AMD", &store);
+        run("section create Semis Memory", &store);
+        run("watchlist add Semis MU --section Memory", &store);
+        run("watchlist add Semis 2330 --suffix TW --section Memory", &store);
+        run("watchlist link Semis 3", &store);
+        // One symbol in two sections, which a list may hold on purpose.
+        run("watchlist add Semis NVDA --section Memory", &store);
+        store
+    }
+
+    #[test]
+    fn an_export_imported_on_another_machine_comes_back_the_same() {
+        let file = run("watchlist export", &exporting()).out;
+        let elsewhere = Store::memory().unwrap();
+        let out = import(&file, "", &elsewhere);
+        assert_eq!(out.code, 0, "{}", out.err);
+        assert!(out.out.contains("Semis: created, 5 symbols in 1 section"), "{}", out.out);
+        // Into the default list, whatever either side calls it.
+        assert!(out.out.contains("Mine: added 2 symbols"), "{}", out.out);
+        assert_eq!(run("watchlist export", &elsewhere).out.replace("Default", "Mine"), file);
+    }
+
+    #[test]
+    fn importing_the_same_file_twice_changes_nothing_the_second_time() {
+        let file = run("watchlist export", &exporting()).out;
+        let elsewhere = Store::memory().unwrap();
+        import(&file, "", &elsewhere);
+        let before = run("watchlist export", &elsewhere).out;
+        let again = import(&file, "", &elsewhere);
+        assert!(again.out.lines().all(|line| line.ends_with("already up to date")), "{}", again.out);
+        assert_eq!(run("watchlist export", &elsewhere).out, before);
+    }
+
+    #[test]
+    fn a_merge_only_adds_and_a_replace_makes_it_match() {
+        let file = run("watchlist export Semis", &exporting()).out;
+        let elsewhere = Store::memory().unwrap();
+        run("watchlist create Semis", &elsewhere);
+        run("watchlist add Semis INTC NVDA", &elsewhere);
+        run("watchlist create Other", &elsewhere);
+
+        let merged = import(&file, "", &elsewhere);
+        // NVDA was already here, so it is not added to Memory as well.
+        assert!(merged.out.contains("Semis: added 3 symbols and 1 section"), "{}", merged.out);
+        let semis = run("watchlist show Semis", &elsewhere).out;
+        // What was here stays, first; what was missing goes after it.
+        assert!(semis.find("INTC").unwrap() < semis.find("AMD").unwrap(), "{semis}");
+
+        let replaced = import(&file, "--replace", &elsewhere);
+        assert!(replaced.out.contains("Semis: replaced"), "{}", replaced.out);
+        assert!(!run("watchlist show Semis", &elsewhere).out.contains("INTC"));
+        // A list the file does not name is never touched.
+        assert!(run("watchlist list", &elsewhere).out.contains("Other"));
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_export_changes_nothing() {
+        let store = exporting();
+        let before = run("watchlist export", &store).out;
+        for bad in [
+            "not json",
+            r#"{"omacharts": "chartbooks", "version": 1, "watchlists": []}"#,
+            r#"{"omacharts": "watchlists", "version": 99, "watchlists": []}"#,
+            r#"{"omacharts": "watchlists", "version": 1, "watchlists": [
+                {"name": "A", "sections": []}, {"name": "a", "sections": []}]}"#,
+        ] {
+            let out = import(bad, "", &store);
+            assert_eq!(out.code, super::super::EXIT_USAGE, "{bad}: {}", out.err);
+        }
+        assert_eq!(run("watchlist export", &store).out, before);
+    }
+
+    #[test]
+    fn a_link_group_already_driven_here_is_left_where_it_is() {
+        let file = run("watchlist export Semis", &exporting()).out;
+        let elsewhere = Store::memory().unwrap();
+        run("watchlist create Macro", &elsewhere);
+        run("watchlist link Macro 3", &elsewhere);
+        let out = import(&file, "", &elsewhere);
+        assert!(out.out.contains("link group 3 stays with \"Macro\""), "{}", out.out);
+        assert_eq!(run("watchlist link Macro", &elsewhere).out, "3\n");
+        assert_eq!(run("watchlist link Semis", &elsewhere).out, "none\n");
     }
 
     #[test]
@@ -3204,7 +3362,7 @@ mod tests {
                     args.push("--to".to_string());
                     args.push(scratch.to_string_lossy().into_owned());
                 }
-                let outcome = dispatch(&args, &store, Some(&NoWindow));
+                let outcome = dispatch(&args, &store, Some(&NoWindow), &super::super::Here);
                 assert_ne!(
                     outcome.code,
                     super::super::EXIT_USAGE,
@@ -3262,7 +3420,7 @@ mod tests {
                 let args: Vec<String> = std::iter::once("omacharts".to_string())
                     .chain(line.split_whitespace().map(String::from))
                     .collect();
-                let outcome = dispatch(&args, &store, Some(&NoWindow));
+                let outcome = dispatch(&args, &store, Some(&NoWindow), &super::super::Here);
                 assert_eq!(
                     outcome.code,
                     super::super::EXIT_OK,

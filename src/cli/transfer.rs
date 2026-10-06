@@ -1,0 +1,336 @@
+//! Watchlists as a file, for carrying them from one machine to another.
+//!
+//! `watchlist export` writes every list — sections, order, symbols and the
+//! link group each drives — and `watchlist import` brings them in on the
+//! other side. Importing adds what is missing and touches nothing else, so
+//! the same file can be imported again and again, on every machine, as the
+//! lists grow: a second run changes nothing. `--replace` is the one way to
+//! make a list match the file exactly, and even that never removes a list the
+//! file does not name.
+//!
+//! The file is the lists and nothing about this machine: no row ids, which
+//! mean nothing anywhere else, and the default list marked as the default
+//! rather than by name, because it can be renamed.
+
+use std::collections::HashSet;
+
+use omacharts_engine::{link, LinkGroup};
+use serde::{Deserialize, Serialize};
+
+use super::Fault;
+use crate::store::{Entry, Store, DEFAULT_WATCHLIST};
+
+/// What the file says it is, so a chartbook or a config file handed to
+/// `import` by mistake is refused rather than read as an empty export.
+const KIND: &str = "watchlists";
+/// Raised when the format changes in a way an older version cannot read.
+const VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+pub struct Export {
+    pub omacharts: String,
+    pub version: u32,
+    pub watchlists: Vec<List>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct List {
+    pub name: String,
+    /// The list every install has. Matched to that one whatever either side
+    /// calls it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub default: bool,
+    /// The link group it drives, 0 for none.
+    #[serde(default)]
+    pub link: u8,
+    pub sections: Vec<Part>,
+}
+
+/// A section. The nameless one holds what is in no section.
+#[derive(Serialize, Deserialize)]
+pub struct Part {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed: bool,
+    pub symbols: Vec<Symbol>,
+}
+
+/// A ticker, written as just the ticker unless it has a venue suffix, which
+/// is how nearly all of them are.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Symbol {
+    Plain(String),
+    Listed { symbol: String, suffix: String },
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+impl Symbol {
+    fn of(entry: &Entry) -> Symbol {
+        match &entry.suffix {
+            Some(suffix) => Symbol::Listed { symbol: entry.symbol.clone(), suffix: suffix.clone() },
+            None => Symbol::Plain(entry.symbol.clone()),
+        }
+    }
+
+    fn entry(&self) -> Entry {
+        let tidy = |text: &str| text.trim().to_uppercase();
+        match self {
+            Symbol::Plain(symbol) => Entry { symbol: tidy(symbol), suffix: None },
+            Symbol::Listed { symbol, suffix } => Entry {
+                symbol: tidy(symbol),
+                suffix: Some(tidy(suffix)).filter(|s| !s.is_empty()),
+            },
+        }
+    }
+}
+
+/// These watchlists, as the file `export` writes.
+pub fn export(store: &Store, lists: &[(i64, String)], link_of: impl Fn(i64) -> u8) -> Export {
+    let watchlists = lists
+        .iter()
+        .map(|(id, name)| List {
+            name: name.clone(),
+            default: *id == DEFAULT_WATCHLIST,
+            link: link_of(*id),
+            sections: store
+                .watchlist_sections(*id)
+                .iter()
+                .map(|section| Part {
+                    name: section.name.clone(),
+                    collapsed: section.collapsed,
+                    symbols: section.entries.iter().map(Symbol::of).collect(),
+                })
+                .collect(),
+        })
+        .collect();
+    Export { omacharts: KIND.to_string(), version: VERSION, watchlists }
+}
+
+/// Read a file `export` wrote, refusing anything that is not one before a
+/// single row is touched.
+pub fn parse(text: &str) -> Result<Export, Fault> {
+    let file: Export = serde_json::from_str(text)
+        .map_err(|error| Fault::usage(format!("not a watchlist export: {error}")))?;
+    if file.omacharts != KIND {
+        return Err(Fault::usage(format!(
+            "this is an omacharts {:?} file, not a watchlist export",
+            file.omacharts
+        )));
+    }
+    if file.version > VERSION {
+        return Err(Fault::usage(format!(
+            "this export was made by a newer Omacharts (format {}); update this one first",
+            file.version
+        )));
+    }
+    let mut names = HashSet::new();
+    for list in &file.watchlists {
+        let name = list.name.trim();
+        if name.is_empty() {
+            return Err(Fault::usage("a watchlist in the file has no name".into()));
+        }
+        if !names.insert(name.to_lowercase()) {
+            return Err(Fault::usage(format!("the file has two watchlists called {name:?}")));
+        }
+        if list.link > link::GROUP_COUNT {
+            return Err(Fault::usage(format!("{name:?} drives link group {}, which is not one", list.link)));
+        }
+        if list.sections.iter().flat_map(|part| &part.symbols).any(|s| s.entry().symbol.is_empty()) {
+            return Err(Fault::usage(format!("{name:?} has an empty symbol")));
+        }
+    }
+    if file.watchlists.iter().filter(|list| list.default).count() > 1 {
+        return Err(Fault::usage("the file marks more than one watchlist as the default".into()));
+    }
+    Ok(file)
+}
+
+/// What importing did to one watchlist.
+pub struct Imported {
+    pub name: String,
+    pub action: &'static str,
+    pub symbols: usize,
+    pub sections: usize,
+    /// A link group the file asked for and another list already drives.
+    pub link_kept_by: Option<(u8, String)>,
+}
+
+impl Imported {
+    pub fn describe(&self) -> String {
+        let counted = |n: usize, one: &str| match n {
+            1 => format!("1 {one}"),
+            n => format!("{n} {one}s"),
+        };
+        let mut text = match self.action {
+            "unchanged" => format!("{}: already up to date", self.name),
+            "merged" => match self.sections {
+                0 => format!("{}: added {}", self.name, counted(self.symbols, "symbol")),
+                n => format!(
+                    "{}: added {} and {}",
+                    self.name,
+                    counted(self.symbols, "symbol"),
+                    counted(n, "section")
+                ),
+            },
+            action => format!(
+                "{}: {action}, {} in {}",
+                self.name,
+                counted(self.symbols, "symbol"),
+                counted(self.sections, "section")
+            ),
+        };
+        if let Some((group, holder)) = &self.link_kept_by {
+            text.push_str(&format!(" (link group {group} stays with {holder:?})"));
+        }
+        text
+    }
+}
+
+/// Bring the file's watchlists in, all of them or none.
+///
+/// Each is matched to a local list by name, or to the default list when the
+/// file says it is the default. A match gains whatever sections and symbols it
+/// lacks, at the end, and nothing it already has is moved; with `replace` it
+/// becomes exactly what the file says instead. A list with no match is
+/// created. `link_setting` is where a list's group is written down.
+pub fn import(
+    store: &Store,
+    file: &Export,
+    replace: bool,
+    link_setting: impl Fn(i64) -> String,
+) -> Result<Vec<Imported>, Fault> {
+    // Every list is matched before anything is written, so a name that is
+    // ambiguous here stops the import rather than half of it.
+    let local = store.watchlists();
+    let mut targets: Vec<Option<i64>> = Vec::new();
+    for list in &file.watchlists {
+        let wanted = list.name.trim().to_lowercase();
+        let named: Vec<i64> = local
+            .iter()
+            .filter(|(_, name)| name.to_lowercase() == wanted)
+            .map(|(id, _)| *id)
+            .collect();
+        let target = match (list.default, named.as_slice()) {
+            (true, _) => Some(DEFAULT_WATCHLIST),
+            (false, []) => None,
+            (false, [one]) => Some(*one),
+            (false, _) => {
+                return Err(Fault::ambiguous(format!(
+                    "{} watchlists here are called {:?}; rename one before importing",
+                    named.len(),
+                    list.name.trim()
+                )));
+            }
+        };
+        if let Some(id) = target.filter(|id| targets.contains(&Some(*id))) {
+            let here = local.iter().find(|(at, _)| *at == id).map_or("", |(_, name)| name);
+            return Err(Fault::usage(format!(
+                "two watchlists in the file would both go into {here:?}"
+            )));
+        }
+        targets.push(target);
+    }
+
+    store
+        .atomically(|| {
+            file.watchlists
+                .iter()
+                .zip(targets)
+                .map(|(list, target)| bring_in(store, list, target, replace, &link_setting))
+                .collect::<Vec<_>>()
+        })
+        .map_err(|error| Fault::new(super::EXIT_ERROR, format!("nothing was imported: {error}")))
+}
+
+fn bring_in(
+    store: &Store,
+    list: &List,
+    target: Option<i64>,
+    replace: bool,
+    link_setting: &impl Fn(i64) -> String,
+) -> Imported {
+    let name = list.name.trim().to_string();
+    let (id, action) = match target {
+        None => (store.add_watchlist(&name).unwrap_or(DEFAULT_WATCHLIST), "created"),
+        Some(id) if replace => {
+            clear(store, id);
+            store.rename_watchlist(id, &name);
+            (id, "replaced")
+        }
+        Some(id) => (id, "merged"),
+    };
+
+    // What the list held before, in any section: a symbol already here is not
+    // added again somewhere else, so a merge never duplicates one that was
+    // moved on the other machine. The file's own symbols are taken as they
+    // are, because a list may hold one symbol in two sections on purpose.
+    let before: HashSet<Entry> =
+        store.watchlist_sections(id).into_iter().flat_map(|s| s.entries).collect();
+    let mut added: HashSet<(i64, Entry)> = HashSet::new();
+    let (mut symbols, mut sections) = (0, 0);
+    for part in &list.sections {
+        let section = match part.name.trim() {
+            "" => store.root_section(id),
+            wanted => {
+                let existing = store
+                    .watchlist_sections(id)
+                    .into_iter()
+                    .find(|s| !s.root && s.name.eq_ignore_ascii_case(wanted));
+                match existing {
+                    Some(section) => section.id,
+                    None => {
+                        let Some(added) = store.add_section(id, wanted) else { continue };
+                        store.set_section_collapsed(added, part.collapsed);
+                        sections += 1;
+                        added
+                    }
+                }
+            }
+        };
+        for symbol in &part.symbols {
+            let entry = symbol.entry();
+            if !before.contains(&entry) && added.insert((section, entry.clone())) {
+                store.add_to_section(section, &entry.symbol, entry.suffix.as_deref());
+                symbols += 1;
+            }
+        }
+    }
+
+    // A group is the file's to set only on a list it is writing whole. On a
+    // merge the list keeps whatever group it drives here.
+    let mut link_kept_by = None;
+    if action != "merged" {
+        match crate::ui::watchlist::group_held_by(store, LinkGroup::numbered(list.link), id) {
+            Some((_, holder)) => link_kept_by = Some((list.link, holder)),
+            None if list.link > 0 || action == "replaced" => {
+                store.set_setting(&link_setting(id), &list.link.to_string());
+            }
+            None => {}
+        }
+    }
+
+    let action = match (action, symbols + sections) {
+        ("merged", 0) => "unchanged",
+        (action, _) => action,
+    };
+    Imported { name, action, symbols, sections, link_kept_by }
+}
+
+/// Empty a watchlist, keeping the list itself and its nameless section.
+fn clear(store: &Store, id: i64) {
+    for section in store.watchlist_sections(id) {
+        match section.root {
+            true => {
+                for entry in &section.entries {
+                    store.remove_from_section(section.id, &entry.symbol, entry.suffix.as_deref());
+                }
+            }
+            false => store.remove_section(section.id),
+        }
+    }
+}

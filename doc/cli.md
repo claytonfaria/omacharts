@@ -365,6 +365,47 @@ moved CL from Energy to Majors in "Default", at the end
   [exit 0]
 ```
 
+## Moving watchlists between machines
+
+`watchlist export` writes every watchlist — sections, their order, the symbols
+in them and the link group each drives — as one JSON file, and `watchlist
+import` brings it in on the other machine. Carry the file however you like:
+Syncthing, a dotfiles repository, `scp`.
+
+```
+$ omacharts watchlist export > watchlists.json
+$ omacharts watchlist export Semis Macro > some.json
+
+$ omacharts watchlist import watchlists.json
+Default: added 2 symbols
+Semis: created, 12 symbols in 3 sections
+Macro: already up to date
+  [exit 0]
+```
+
+**Importing adds and never takes away.** A watchlist is matched by name, and
+the default one to the default one whatever either is called. A match gains
+the sections and symbols it lacks, after what it already has; nothing it holds
+is moved or removed, and a symbol it already has is not added again in another
+section. A watchlist with no match is created, with the link group it drove,
+unless another list here already drives that group. So the same file can be
+imported on every machine, as often as you like, and a second run changes
+nothing.
+
+`--replace` makes each watchlist in the file exactly what it was where it was
+exported — sections, order, link group — for when this machine should match
+rather than combine. Watchlists the file does not name are never touched, by
+either form.
+
+An import lands whole or not at all: a file that is not an export, one made by
+a newer Omacharts, or one naming a list that is ambiguous here changes nothing.
+
+`-` reads the file from stdin, which is how to import over ssh:
+
+```
+$ ssh desktop omacharts watchlist import - < watchlists.json
+```
+
 ## Failure is unambiguous
 
 A name that does not exist and a command that was misspelled fail differently,
