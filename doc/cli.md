@@ -249,6 +249,49 @@ Semis
   [exit 0]
 ```
 
+A list that lives in a file goes in the same way, because `watchlist add` takes
+as many symbols as it is given. Leave `$(cat …)` unquoted: the shell splits the
+file into one argument per ticker, where the quoted form would hand over the
+whole file as a single name that is no instrument at all.
+
+```
+$ cat semis.txt
+QCOM
+INTC
+ARM
+MRVL
+
+$ omacharts watchlist add Semis $(cat semis.txt)
+added 4 to "Semis": QCOM INTC ARM MRVL
+  [exit 0]
+```
+
+Symbols on different venues mix freely, each written the way a quote page
+writes it:
+
+```
+$ omacharts watchlist add Semis SAN.MC SAP.DE 2330.TW BRK.B
+added 4 to "Semis": SAN.MC SAP.DE 2330.TW BRK.B
+  [exit 0]
+```
+
+A watchlist exported from another charting tool usually needs tidying on the
+way in — exchange prefixes, quotes, `###` section headings, Windows line
+endings. That is a job for the shell, not for Omacharts:
+
+```
+$ cat export.txt
+###Mega caps,NASDAQ:AAPL,NASDAQ:MSFT,###Banks,NYSE:JPM,"NASDAQ:NVDA";NOTATICKER
+
+$ omacharts watchlist add Semis $(tr -d '\r"' < export.txt | tr ',;' '\n\n' | grep -v '^[[:space:]]*#' | sed 's/.*://')
+added 4 to "Semis": AAPL MSFT JPM NVDA
+skipped, not instruments: NOTATICKER
+  [exit 0]
+```
+
+Anything that is not an instrument is named rather than dropped, and the rest
+still goes in.
+
 Did not know the tickers? Search for them first:
 
 ```
