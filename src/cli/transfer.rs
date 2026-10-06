@@ -223,16 +223,13 @@ pub fn import(store: &Store, file: &Export, replace: bool) -> Result<Vec<Importe
     // Every list is matched before anything is written, so a name that is
     // ambiguous here stops the import rather than half of it.
     let local = store.watchlists();
-    let mut targets: Vec<Option<i64>> = Vec::new();
+    let mut targets: Vec<Option<&(i64, String)>> = Vec::new();
     for list in &file.watchlists {
         let wanted = list.name.trim().to_lowercase();
-        let named: Vec<i64> = local
-            .iter()
-            .filter(|(_, name)| name.to_lowercase() == wanted)
-            .map(|(id, _)| *id)
-            .collect();
+        let named: Vec<&(i64, String)> =
+            local.iter().filter(|(_, name)| name.to_lowercase() == wanted).collect();
         let target = match (list.default, named.as_slice()) {
-            (true, _) => Some(DEFAULT_WATCHLIST),
+            (true, _) => local.iter().find(|(id, _)| *id == DEFAULT_WATCHLIST),
             (false, []) => None,
             (false, [one]) => Some(*one),
             (false, _) => {
@@ -243,8 +240,7 @@ pub fn import(store: &Store, file: &Export, replace: bool) -> Result<Vec<Importe
                 )));
             }
         };
-        if let Some(id) = target.filter(|id| targets.contains(&Some(*id))) {
-            let here = local.iter().find(|(at, _)| *at == id).map_or("", |(_, name)| name);
+        if let Some((_, here)) = target.filter(|_| targets.contains(&target)) {
             return Err(Fault::usage(format!(
                 "two watchlists in the file would both go into {here:?}"
             )));
@@ -258,21 +254,35 @@ pub fn import(store: &Store, file: &Export, replace: bool) -> Result<Vec<Importe
                 .iter()
                 .zip(targets)
                 .map(|(list, target)| bring_in(store, list, target, replace))
-                .collect::<Vec<_>>()
+                .collect()
         })
-        .map_err(|error| Fault::new(super::EXIT_ERROR, format!("nothing was imported: {error}")))
+        .ok_or_else(|| {
+            Fault::new(super::EXIT_ERROR, "nothing was imported: the database refused a write".into())
+        })
 }
 
-fn bring_in(store: &Store, list: &List, target: Option<i64>, replace: bool) -> Imported {
-    let name = list.name.trim().to_string();
-    let (id, action) = match target {
-        None => (store.add_watchlist(&name).unwrap_or(DEFAULT_WATCHLIST), Action::Created),
-        Some(id) if replace => {
-            clear(store, id);
-            store.rename_watchlist(id, &name);
-            (id, Action::Replaced)
+/// One list, into `target` when it matched one here and into a new list
+/// otherwise. `None` is a write the store refused, which rolls the whole
+/// import back.
+fn bring_in(
+    store: &Store,
+    list: &List,
+    target: Option<&(i64, String)>,
+    replace: bool,
+) -> Option<Imported> {
+    // A list that matched keeps its own name: the file's name was there to
+    // match on, and the default matched by being the default. So the default
+    // list stays what it is called here, whatever it was renamed to there.
+    let (id, name, action) = match target {
+        None => {
+            let name = list.name.trim().to_string();
+            (store.add_watchlist(&name)?, name, Action::Created)
         }
-        Some(id) => (id, Action::Merged),
+        Some((id, name)) if replace => {
+            clear(store, *id);
+            (*id, name.clone(), Action::Replaced)
+        }
+        Some((id, name)) => (*id, name.clone(), Action::Merged),
     };
 
     // What the list held before, in any section: a symbol already here is not
@@ -283,7 +293,6 @@ fn bring_in(store: &Store, list: &List, target: Option<i64>, replace: bool) -> I
     let before: HashSet<&Entry> = here.iter().flat_map(|s| &s.entries).collect();
     let mut named: HashMap<String, i64> =
         here.iter().filter(|s| !s.root).map(|s| (s.name.to_lowercase(), s.id)).collect();
-    let mut added: HashSet<(i64, Entry)> = HashSet::new();
     let (mut symbols, mut sections) = (0, 0);
     for part in &list.sections {
         let section = match part.name.trim() {
@@ -291,7 +300,7 @@ fn bring_in(store: &Store, list: &List, target: Option<i64>, replace: bool) -> I
             wanted => match named.get(&wanted.to_lowercase()) {
                 Some(existing) => *existing,
                 None => {
-                    let Some(made) = store.add_section(id, wanted) else { continue };
+                    let made = store.add_section(id, wanted)?;
                     store.set_section_collapsed(made, part.collapsed);
                     named.insert(wanted.to_lowercase(), made);
                     sections += 1;
@@ -301,7 +310,7 @@ fn bring_in(store: &Store, list: &List, target: Option<i64>, replace: bool) -> I
         };
         for symbol in &part.symbols {
             let entry = symbol.entry();
-            if !before.contains(&entry) && added.insert((section, entry.clone())) {
+            if !before.contains(&entry) {
                 store.add_to_section(section, &entry.symbol, entry.suffix.as_deref());
                 symbols += 1;
             }
@@ -325,7 +334,7 @@ fn bring_in(store: &Store, list: &List, target: Option<i64>, replace: bool) -> I
         (Action::Merged, 0) => Action::Unchanged,
         (action, _) => action,
     };
-    Imported { name, action, symbols, sections, link_kept_by }
+    Some(Imported { name, action, symbols, sections, link_kept_by })
 }
 
 /// Empty a watchlist, keeping the list itself and its nameless section.

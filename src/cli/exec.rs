@@ -2361,8 +2361,12 @@ mod tests {
         let out = import(&file, "", &elsewhere);
         assert_eq!(out.code, 0, "{}", out.err);
         assert!(out.out.contains("Semis: created, 5 symbols in 1 section"), "{}", out.out);
-        // Into the default list, whatever either side calls it.
-        assert!(out.out.contains("Mine: added 2 symbols"), "{}", out.out);
+        // Into the default list, whatever either side calls it, and under the
+        // name it has here — even when the file replaces it.
+        assert!(out.out.contains("Default: added 2 symbols"), "{}", out.out);
+        assert_eq!(run("watchlist export", &elsewhere).out.replace("Default", "Mine"), file);
+        assert!(import(&file, "--replace", &elsewhere).out.contains("Default: replaced"));
+        assert!(run("watchlist list", &elsewhere).out.contains("Default"));
         assert_eq!(run("watchlist export", &elsewhere).out.replace("Default", "Mine"), file);
     }
 
