@@ -152,6 +152,7 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+B", "Open, focus, then close"),
             ("↑ ↓", "Next or previous symbol"),
             ("Ctrl+↑ ↓", "Next or previous section"),
+            ("← → Enter", "Fold or unfold a section"),
             // The one binding in this grid that is not global, so the
             // row says where it works: pressed over a chart it does
             // nothing, and nothing is hard to ask a question about.
