@@ -229,29 +229,19 @@ struct Typed<'a>(&'a gio::ApplicationCommandLine);
 impl cli::Caller for Typed<'_> {
     fn read(&self, path: &str) -> Result<String, cli::Fault> {
         use gio::prelude::*;
-        let bytes = match path {
-            "-" => {
-                let stdin = self.0.stdin().ok_or_else(|| cli::unreadable(path, "none was passed"))?;
-                let mut bytes = Vec::new();
-                let mut chunk = vec![0u8; 64 * 1024];
-                loop {
-                    match stdin.read(&mut chunk[..], gio::Cancellable::NONE) {
-                        Ok(0) => break,
-                        Ok(n) => bytes.extend_from_slice(&chunk[..n]),
-                        Err(error) => return Err(cli::unreadable(path, error)),
-                    }
-                }
-                bytes
-            }
-            path => {
-                let file = self.0.create_file_for_arg(path);
-                file.load_contents(gio::Cancellable::NONE)
-                    .map_err(|error| cli::unreadable(path, error))?
-                    .0
-                    .to_vec()
-            }
-        };
-        String::from_utf8(bytes).map_err(|error| cli::unreadable(path, error))
+        use std::io::Read;
+        if path == "-" {
+            let stdin = self.0.stdin().ok_or_else(|| cli::unreadable(path, "none was passed"))?;
+            let mut text = String::new();
+            stdin.into_read().read_to_string(&mut text).map_err(|e| cli::unreadable(path, e))?;
+            return Ok(text);
+        }
+        let (bytes, _) = self
+            .0
+            .create_file_for_arg(path)
+            .load_contents(gio::Cancellable::NONE)
+            .map_err(|error| cli::unreadable(path, error))?;
+        String::from_utf8(bytes.to_vec()).map_err(|error| cli::unreadable(path, error))
     }
 }
 

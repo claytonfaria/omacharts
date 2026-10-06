@@ -352,7 +352,7 @@ fn link_group(text: &str) -> Result<u8, Fault> {
 /// `the_group_a_command_sets_is_the_one_the_rail_reads` writes through this
 /// one and reads back through that one, so the two cannot drift apart
 /// unnoticed.
-fn link_setting(watchlist: i64) -> String {
+pub(super) fn link_setting(watchlist: i64) -> String {
     format!("watchlist_link_{watchlist}")
 }
 
@@ -498,7 +498,7 @@ fn watchlist_export(store: &Store, m: &clap::ArgMatches) -> Result<String, Fault
         None => store.watchlists(),
         Some(named) => named.map(|selector| find_list(store, selector)).collect::<Result<_, _>>()?,
     };
-    let file = super::transfer::export(store, &lists, |id| link_group_of(store, id));
+    let file = super::transfer::export(store, &lists);
     let text = serde_json::to_string_pretty(&file)
         .map_err(|error| Fault::new(super::EXIT_ERROR, error.to_string()))?;
     Ok(format!("{text}\n"))
@@ -512,14 +512,14 @@ fn watchlist_import(
     caller: &dyn Caller,
 ) -> Result<String, Fault> {
     let file = super::transfer::parse(&caller.read(required(m, "FILE")?)?)?;
-    let imported = super::transfer::import(store, &file, flag(m, "replace"), link_setting)?;
+    let imported = super::transfer::import(store, &file, flag(m, "replace"))?;
     if as_json {
         let rows = imported
             .iter()
             .map(|done| {
                 json!({
                     "name": done.name,
-                    "action": done.action,
+                    "action": done.action.key(),
                     "symbols": done.symbols,
                     "sections": done.sections,
                     "linkKeptBy": done.link_kept_by.as_ref().map(|(_, holder)| holder),

@@ -156,7 +156,7 @@ pub fn stdin_is_not_piped(args: &[String]) -> Option<Outcome> {
     (is_command(args) && args.iter().any(|arg| arg == "-") && std::io::stdin().is_terminal())
         .then(|| {
             Outcome::failed(Fault::usage(
-                "`-` reads what is piped in, and nothing is; try `< watchlists.json`".into(),
+                "`-` reads what is piped in, and nothing is; pipe a file in with `< FILE`".into(),
             ))
         })
 }

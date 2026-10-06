@@ -12,11 +12,12 @@
 //! mean nothing anywhere else, and the default list marked as the default
 //! rather than by name, because it can be renamed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use omacharts_engine::{link, LinkGroup};
 use serde::{Deserialize, Serialize};
 
+use super::exec::link_setting;
 use super::Fault;
 use crate::store::{Entry, Store, DEFAULT_WATCHLIST};
 
@@ -90,13 +91,18 @@ impl Symbol {
 }
 
 /// These watchlists, as the file `export` writes.
-pub fn export(store: &Store, lists: &[(i64, String)], link_of: impl Fn(i64) -> u8) -> Export {
+pub fn export(store: &Store, lists: &[(i64, String)]) -> Export {
+    // Who drives what, read once: asking per list rescans every list each time.
+    let links: HashMap<i64, u8> = crate::ui::watchlist::group_owners(store)
+        .into_iter()
+        .map(|(group, id, _)| (id, group))
+        .collect();
     let watchlists = lists
         .iter()
         .map(|(id, name)| List {
             name: name.clone(),
             default: *id == DEFAULT_WATCHLIST,
-            link: link_of(*id),
+            link: links.get(id).copied().unwrap_or(0),
             sections: store
                 .watchlist_sections(*id)
                 .iter()
@@ -150,10 +156,30 @@ pub fn parse(text: &str) -> Result<Export, Fault> {
     Ok(file)
 }
 
+/// What an import did to one watchlist.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Action {
+    Created,
+    Merged,
+    Replaced,
+    Unchanged,
+}
+
+impl Action {
+    pub fn key(self) -> &'static str {
+        match self {
+            Action::Created => "created",
+            Action::Merged => "merged",
+            Action::Replaced => "replaced",
+            Action::Unchanged => "unchanged",
+        }
+    }
+}
+
 /// What importing did to one watchlist.
 pub struct Imported {
     pub name: String,
-    pub action: &'static str,
+    pub action: Action,
     pub symbols: usize,
     pub sections: usize,
     /// A link group the file asked for and another list already drives.
@@ -166,21 +192,16 @@ impl Imported {
             1 => format!("1 {one}"),
             n => format!("{n} {one}s"),
         };
+        let (name, symbols) = (&self.name, counted(self.symbols, "symbol"));
         let mut text = match self.action {
-            "unchanged" => format!("{}: already up to date", self.name),
-            "merged" => match self.sections {
-                0 => format!("{}: added {}", self.name, counted(self.symbols, "symbol")),
-                n => format!(
-                    "{}: added {} and {}",
-                    self.name,
-                    counted(self.symbols, "symbol"),
-                    counted(n, "section")
-                ),
-            },
+            Action::Unchanged => format!("{name}: already up to date"),
+            Action::Merged if self.sections == 0 => format!("{name}: added {symbols}"),
+            Action::Merged => {
+                format!("{name}: added {symbols} and {}", counted(self.sections, "section"))
+            }
             action => format!(
-                "{}: {action}, {} in {}",
-                self.name,
-                counted(self.symbols, "symbol"),
+                "{name}: {}, {symbols} in {}",
+                action.key(),
                 counted(self.sections, "section")
             ),
         };
@@ -197,13 +218,8 @@ impl Imported {
 /// file says it is the default. A match gains whatever sections and symbols it
 /// lacks, at the end, and nothing it already has is moved; with `replace` it
 /// becomes exactly what the file says instead. A list with no match is
-/// created. `link_setting` is where a list's group is written down.
-pub fn import(
-    store: &Store,
-    file: &Export,
-    replace: bool,
-    link_setting: impl Fn(i64) -> String,
-) -> Result<Vec<Imported>, Fault> {
+/// created.
+pub fn import(store: &Store, file: &Export, replace: bool) -> Result<Vec<Imported>, Fault> {
     // Every list is matched before anything is written, so a name that is
     // ambiguous here stops the import rather than half of it.
     let local = store.watchlists();
@@ -241,56 +257,47 @@ pub fn import(
             file.watchlists
                 .iter()
                 .zip(targets)
-                .map(|(list, target)| bring_in(store, list, target, replace, &link_setting))
+                .map(|(list, target)| bring_in(store, list, target, replace))
                 .collect::<Vec<_>>()
         })
         .map_err(|error| Fault::new(super::EXIT_ERROR, format!("nothing was imported: {error}")))
 }
 
-fn bring_in(
-    store: &Store,
-    list: &List,
-    target: Option<i64>,
-    replace: bool,
-    link_setting: &impl Fn(i64) -> String,
-) -> Imported {
+fn bring_in(store: &Store, list: &List, target: Option<i64>, replace: bool) -> Imported {
     let name = list.name.trim().to_string();
     let (id, action) = match target {
-        None => (store.add_watchlist(&name).unwrap_or(DEFAULT_WATCHLIST), "created"),
+        None => (store.add_watchlist(&name).unwrap_or(DEFAULT_WATCHLIST), Action::Created),
         Some(id) if replace => {
             clear(store, id);
             store.rename_watchlist(id, &name);
-            (id, "replaced")
+            (id, Action::Replaced)
         }
-        Some(id) => (id, "merged"),
+        Some(id) => (id, Action::Merged),
     };
 
     // What the list held before, in any section: a symbol already here is not
     // added again somewhere else, so a merge never duplicates one that was
     // moved on the other machine. The file's own symbols are taken as they
     // are, because a list may hold one symbol in two sections on purpose.
-    let before: HashSet<Entry> =
-        store.watchlist_sections(id).into_iter().flat_map(|s| s.entries).collect();
+    let here = store.watchlist_sections(id);
+    let before: HashSet<&Entry> = here.iter().flat_map(|s| &s.entries).collect();
+    let mut named: HashMap<String, i64> =
+        here.iter().filter(|s| !s.root).map(|s| (s.name.to_lowercase(), s.id)).collect();
     let mut added: HashSet<(i64, Entry)> = HashSet::new();
     let (mut symbols, mut sections) = (0, 0);
     for part in &list.sections {
         let section = match part.name.trim() {
             "" => store.root_section(id),
-            wanted => {
-                let existing = store
-                    .watchlist_sections(id)
-                    .into_iter()
-                    .find(|s| !s.root && s.name.eq_ignore_ascii_case(wanted));
-                match existing {
-                    Some(section) => section.id,
-                    None => {
-                        let Some(added) = store.add_section(id, wanted) else { continue };
-                        store.set_section_collapsed(added, part.collapsed);
-                        sections += 1;
-                        added
-                    }
+            wanted => match named.get(&wanted.to_lowercase()) {
+                Some(existing) => *existing,
+                None => {
+                    let Some(made) = store.add_section(id, wanted) else { continue };
+                    store.set_section_collapsed(made, part.collapsed);
+                    named.insert(wanted.to_lowercase(), made);
+                    sections += 1;
+                    made
                 }
-            }
+            },
         };
         for symbol in &part.symbols {
             let entry = symbol.entry();
@@ -304,10 +311,10 @@ fn bring_in(
     // A group is the file's to set only on a list it is writing whole. On a
     // merge the list keeps whatever group it drives here.
     let mut link_kept_by = None;
-    if action != "merged" {
+    if action != Action::Merged {
         match crate::ui::watchlist::group_held_by(store, LinkGroup::numbered(list.link), id) {
             Some((_, holder)) => link_kept_by = Some((list.link, holder)),
-            None if list.link > 0 || action == "replaced" => {
+            None if list.link > 0 || action == Action::Replaced => {
                 store.set_setting(&link_setting(id), &list.link.to_string());
             }
             None => {}
@@ -315,7 +322,7 @@ fn bring_in(
     }
 
     let action = match (action, symbols + sections) {
-        ("merged", 0) => "unchanged",
+        (Action::Merged, 0) => Action::Unchanged,
         (action, _) => action,
     };
     Imported { name, action, symbols, sections, link_kept_by }
