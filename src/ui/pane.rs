@@ -52,6 +52,7 @@ pub struct ChartPane {
     /// The resolution beside the symbol, which opens every resolution: the
     /// one way to change it that fits on any chart, however narrow.
     pub timeframe_menu: gtk::MenuButton,
+    timeframe_label: gtk::Label,
     /// One row per indicator, under the readout.
     pub indicator_legend: gtk::Box,
     pub gear: gtk::Button,
@@ -122,7 +123,16 @@ impl ChartPane {
         timeframe_menu.add_css_class("flat");
         timeframe_menu.add_css_class("readout-symbol");
         timeframe_menu.set_valign(gtk::Align::Center);
-        timeframe_menu.set_tooltip_text(Some("Resolution"));
+        timeframe_menu.set_tooltip_text(Some("Resolution: click for the list"));
+        // No chevron: a screenshot keeps this label because it is information,
+        // and a chevron would put a control into every picture of a chart. The
+        // flat button's hover is affordance enough, as it is for the symbol.
+        // A label of our own rather than the button's, because a MenuButton
+        // draws the arrow after a plain label whatever it is told, and only
+        // listens when given a child.
+        let timeframe_label = gtk::Label::new(None);
+        timeframe_menu.set_child(Some(&timeframe_label));
+        timeframe_menu.set_always_show_arrow(false);
 
         // Drawn rather than named. Adwaita's "insert-link" is a chain with a
         // downward arrow under it — it means *insert* a link, and the arrow
@@ -243,6 +253,7 @@ impl ChartPane {
             strip,
             buttons: RefCell::new(Vec::new()),
             timeframe_menu,
+            timeframe_label,
             indicator_legend,
             gear,
             link,
@@ -375,7 +386,7 @@ impl ChartPane {
     /// becomes conditional the label would go on naming whichever resolution
     /// the chart was on when its symbol last arrived.
     fn write_timeframe(&self) {
-        self.timeframe_menu.set_label(&self.timeframe.get().label());
+        self.timeframe_label.set_text(&self.timeframe.get().label());
     }
 }
 
