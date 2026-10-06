@@ -249,6 +249,26 @@ Semis
   [exit 0]
 ```
 
+A file of tickers goes in the same way. Leave `$(cat …)` unquoted, so the
+shell splits it into one argument per ticker:
+
+```
+$ omacharts watchlist add Semis $(cat semis.txt)
+added 4 to "Semis": QCOM INTC ARM MRVL
+  [exit 0]
+```
+
+A watchlist exported from another charting tool needs tidying first —
+exchange prefixes, quotes, `###` headings, Windows line endings — and the
+shell can do it:
+
+```
+$ omacharts watchlist add Semis $(tr -d '\r"' < export.txt | tr ',;' '\n\n' | grep -v '^[[:space:]]*#' | sed 's/.*://')
+added 4 to "Semis": AAPL MSFT JPM NVDA
+skipped, not instruments: NOTATICKER
+  [exit 0]
+```
+
 Did not know the tickers? Search for them first:
 
 ```
