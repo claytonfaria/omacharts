@@ -174,19 +174,14 @@ enum Fold {
     Toggle,
 }
 
-/// The section a folding key acts on where the keyboard is, and whether it
-/// ends up folded; `None` leaves the key to the list.
-///
-/// On a header every one of them is the header's. On a symbol only ← means
-/// anything — fold the section it is in, the way a tree folds the branch a leaf
-/// is on — and only in a section with a header, which is the only place to put
-/// the keyboard afterwards. The symbols outside any section have none.
-fn fold_target(on: &RowKind, folded: bool, key: Fold, has_header: bool) -> Option<(i64, bool)> {
+/// The section a folding key acts on from this row, and whether it ends up
+/// folded; `None` leaves the key to the list.
+fn fold_target(on: &RowKind, key: Fold) -> Option<(i64, bool)> {
     match (on, key) {
-        (RowKind::Header { section_id }, Fold::Close) => Some((*section_id, true)),
-        (RowKind::Header { section_id }, Fold::Open) => Some((*section_id, false)),
-        (RowKind::Header { section_id }, Fold::Toggle) => Some((*section_id, !folded)),
-        (RowKind::Entry { section_id, .. }, Fold::Close) if has_header => Some((*section_id, true)),
+        (RowKind::Header { section_id, .. }, Fold::Close) => Some((*section_id, true)),
+        (RowKind::Header { section_id, .. }, Fold::Open) => Some((*section_id, false)),
+        (RowKind::Header { section_id, collapsed }, Fold::Toggle) => Some((*section_id, !collapsed)),
+        (RowKind::Entry { section_id, .. }, Fold::Close) => Some((*section_id, true)),
         _ => None,
     }
 }
@@ -194,7 +189,7 @@ fn fold_target(on: &RowKind, folded: bool, key: Fold, has_header: bool) -> Optio
 /// What a row in the list is.
 #[derive(Clone)]
 enum RowKind {
-    Header { section_id: i64 },
+    Header { section_id: i64, collapsed: bool },
     Entry {
         section_id: i64,
         entry: Entry,
@@ -207,7 +202,7 @@ enum RowKind {
 impl RowKind {
     fn section_id(&self) -> i64 {
         match self {
-            RowKind::Header { section_id } | RowKind::Entry { section_id, .. } => *section_id,
+            RowKind::Header { section_id, .. } | RowKind::Entry { section_id, .. } => *section_id,
         }
     }
 }
@@ -848,10 +843,10 @@ impl Watchlist {
         self.list.add_controller(keys);
 
         // ← folds and → unfolds the section header the keyboard is on, and
-        // Enter or Space flips it; ← on a symbol folds the section it is in.
-        // Caught on the way down, before the list's own Enter and Space, which
-        // would otherwise spend the key activating a header that does nothing
-        // when activated.
+        // Enter or Space flips it; ← on a symbol folds the section it is in,
+        // the way a tree folds the branch a leaf is on. Caught on the way down,
+        // before the list's own Enter and Space, which would otherwise spend the
+        // key activating a header that does nothing when activated.
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let this = self.clone();
@@ -861,17 +856,16 @@ impl Watchlist {
                 | ModifierType::ALT_MASK
                 | ModifierType::SHIFT_MASK
                 | ModifierType::SUPER_MASK;
+            if state.intersects(held) {
+                return glib::Propagation::Proceed;
+            }
             let fold = match key {
-                _ if state.intersects(held) => return glib::Propagation::Proceed,
                 Key::Left | Key::KP_Left => Fold::Close,
                 Key::Right | Key::KP_Right => Fold::Open,
                 Key::Return | Key::KP_Enter | Key::space => Fold::Toggle,
                 _ => return glib::Propagation::Proceed,
             };
-            match this.fold_from_keyboard(fold) {
-                true => glib::Propagation::Stop,
-                false => glib::Propagation::Proceed,
-            }
+            glib::Propagation::from(this.fold_from_keyboard(fold))
         });
         self.list.add_controller(keys);
 
@@ -916,40 +910,32 @@ impl Watchlist {
     /// keyboard on its header. A rebuild makes every row new, so without that
     /// the next arrow key would start from nowhere.
     fn fold_from_keyboard(self: &Rc<Self>, key: Fold) -> bool {
-        // Renaming a section is typing, and a space in a name is a space.
-        if self.list.root().and_then(|root| root.focus()).is_some_and(|f| f.is::<gtk::Text>()) {
+        // Only when a row itself has the keyboard: a key in the box renaming a
+        // section, or on a button in a header, is that widget's.
+        let Some(row) = self.list.root().and_then(|root| root.focus()).and_downcast::<gtk::ListBoxRow>()
+        else {
+            return false;
+        };
+        let on = self.rows.borrow().get(row.index().max(0) as usize).cloned();
+        let Some((id, folded)) = on.and_then(|on| fold_target(&on, key)) else { return false };
+        // The symbols outside any section have no header to fold to.
+        if self.header_row(id).is_none() {
             return false;
         }
-        let Some(row) = self.list.focus_child().and_downcast::<gtk::ListBoxRow>() else {
-            return false;
-        };
-        let at = row.index();
-        let target = {
-            let rows = self.rows.borrow();
-            let Some(on) = rows.get(at.max(0) as usize) else { return false };
-            let id = on.section_id();
-            let has_header =
-                rows.iter().any(|kind| matches!(kind, RowKind::Header { section_id } if *section_id == id));
-            fold_target(on, self.is_folded(id), key, has_header)
-        };
-        let Some((id, folded)) = target else { return false };
         self.fold_section(id, folded);
-        if let Some(row) = self.header_row(id) {
-            row.grab_focus();
+        if let Some(header) = self.header_row(id) {
+            header.grab_focus();
         }
         true
     }
 
-    fn is_folded(&self, section_id: i64) -> bool {
-        self.store
-            .watchlist_sections(self.active.get())
-            .iter()
-            .any(|section| section.id == section_id && section.collapsed)
-    }
-
     /// Fold or unfold a section. Nothing is rebuilt when it is already that way.
     fn fold_section(self: &Rc<Self>, section_id: i64, folded: bool) {
-        if self.is_folded(section_id) != folded {
+        let already = self.rows.borrow().iter().any(|kind| match kind {
+            RowKind::Header { section_id: id, collapsed } => *id == section_id && *collapsed == folded,
+            RowKind::Entry { .. } => false,
+        });
+        if !already {
             self.store.set_section_collapsed(section_id, folded);
             self.rebuild();
         }
@@ -957,7 +943,7 @@ impl Watchlist {
 
     fn header_row(&self, section_id: i64) -> Option<gtk::ListBoxRow> {
         let at = self.rows.borrow().iter().position(
-            |kind| matches!(kind, RowKind::Header { section_id: id } if *id == section_id),
+            |kind| matches!(kind, RowKind::Header { section_id: id, .. } if *id == section_id),
         )?;
         self.list.row_at_index(at as i32)
     }
@@ -1001,7 +987,7 @@ impl Watchlist {
             .iter()
             .rev()
             .find_map(|kind| match kind {
-                RowKind::Entry { section_id, .. } | RowKind::Header { section_id } => {
+                RowKind::Entry { section_id, .. } | RowKind::Header { section_id, .. } => {
                     Some(*section_id)
                 }
             });
@@ -1103,7 +1089,7 @@ impl Watchlist {
         for section in self.store.watchlist_sections(self.active.get()) {
             if !section.root {
                 self.list.append(&self.section_header(section.id, &section.name, section.collapsed));
-                kinds.push(RowKind::Header { section_id: section.id });
+                kinds.push(RowKind::Header { section_id: section.id, collapsed: section.collapsed });
             }
             for entry in &section.entries {
                 let Some(instrument) = self.index.find(&entry.symbol, entry.suffix.as_deref()) else {
@@ -2429,16 +2415,16 @@ mod tests {
         assert_eq!(promote_section_in(&store, DEFAULT_WATCHLIST, 9_999, "Nowhere"), None);
     }
 
-    /// ← folds, → unfolds and Enter flips the header the keyboard is on, and
-    /// ← on a symbol folds its section — but only a section with a header to
-    /// land on. Everything else is the list's, so arrows still walk the rail.
+    /// Everything but the folding keys is the list's, so arrows still walk
+    /// the rail and Enter on a symbol is still the symbol's.
     #[test]
     fn folding_keys_act_on_the_header_or_the_section_a_symbol_is_in() {
-        let header = RowKind::Header { section_id: 3 };
-        assert_eq!(fold_target(&header, false, Fold::Close, true), Some((3, true)));
-        assert_eq!(fold_target(&header, true, Fold::Open, true), Some((3, false)));
-        assert_eq!(fold_target(&header, true, Fold::Toggle, true), Some((3, false)));
-        assert_eq!(fold_target(&header, false, Fold::Toggle, true), Some((3, true)));
+        let open = RowKind::Header { section_id: 3, collapsed: false };
+        let folded = RowKind::Header { section_id: 3, collapsed: true };
+        assert_eq!(fold_target(&open, Fold::Close), Some((3, true)));
+        assert_eq!(fold_target(&folded, Fold::Open), Some((3, false)));
+        assert_eq!(fold_target(&folded, Fold::Toggle), Some((3, false)));
+        assert_eq!(fold_target(&open, Fold::Toggle), Some((3, true)));
 
         let symbol = RowKind::Entry {
             section_id: 3,
@@ -2458,10 +2444,9 @@ mod tests {
             },
             cells: Vec::new(),
         };
-        assert_eq!(fold_target(&symbol, false, Fold::Close, true), Some((3, true)));
-        assert_eq!(fold_target(&symbol, false, Fold::Close, false), None, "no header to fold to");
-        assert_eq!(fold_target(&symbol, false, Fold::Open, true), None);
-        assert_eq!(fold_target(&symbol, false, Fold::Toggle, true), None, "Enter stays the symbol's");
+        assert_eq!(fold_target(&symbol, Fold::Close), Some((3, true)));
+        assert_eq!(fold_target(&symbol, Fold::Open), None);
+        assert_eq!(fold_target(&symbol, Fold::Toggle), None, "Enter stays the symbol's");
     }
 
     /// A handful of lists, so running off one end should land on the other
