@@ -166,6 +166,31 @@ pub fn columns_to_string(columns: &[Column]) -> String {
     columns.iter().map(|c| c.key()).collect::<Vec<_>>().join(",")
 }
 
+/// A key that folds sections.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Fold {
+    Close,
+    Open,
+    Toggle,
+}
+
+/// The section a folding key acts on where the keyboard is, and whether it
+/// ends up folded; `None` leaves the key to the list.
+///
+/// On a header every one of them is the header's. On a symbol only ← means
+/// anything — fold the section it is in, the way a tree folds the branch a leaf
+/// is on — and only in a section with a header, which is the only place to put
+/// the keyboard afterwards. The symbols outside any section have none.
+fn fold_target(on: &RowKind, folded: bool, key: Fold, has_header: bool) -> Option<(i64, bool)> {
+    match (on, key) {
+        (RowKind::Header { section_id }, Fold::Close) => Some((*section_id, true)),
+        (RowKind::Header { section_id }, Fold::Open) => Some((*section_id, false)),
+        (RowKind::Header { section_id }, Fold::Toggle) => Some((*section_id, !folded)),
+        (RowKind::Entry { section_id, .. }, Fold::Close) if has_header => Some((*section_id, true)),
+        _ => None,
+    }
+}
+
 /// What a row in the list is.
 #[derive(Clone)]
 enum RowKind {
@@ -822,6 +847,34 @@ impl Watchlist {
         });
         self.list.add_controller(keys);
 
+        // ← folds and → unfolds the section header the keyboard is on, and
+        // Enter or Space flips it; ← on a symbol folds the section it is in.
+        // Caught on the way down, before the list's own Enter and Space, which
+        // would otherwise spend the key activating a header that does nothing
+        // when activated.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let this = self.clone();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            use gtk::gdk::{Key, ModifierType};
+            let held = ModifierType::CONTROL_MASK
+                | ModifierType::ALT_MASK
+                | ModifierType::SHIFT_MASK
+                | ModifierType::SUPER_MASK;
+            let fold = match key {
+                _ if state.intersects(held) => return glib::Propagation::Proceed,
+                Key::Left | Key::KP_Left => Fold::Close,
+                Key::Right | Key::KP_Right => Fold::Open,
+                Key::Return | Key::KP_Enter | Key::space => Fold::Toggle,
+                _ => return glib::Propagation::Proceed,
+            };
+            match this.fold_from_keyboard(fold) {
+                true => glib::Propagation::Stop,
+                false => glib::Propagation::Proceed,
+            }
+        });
+        self.list.add_controller(keys);
+
         // Delete takes the highlighted symbol off the rail.
         let keys = gtk::EventControllerKey::new();
         let this = self.clone();
@@ -857,6 +910,56 @@ impl Watchlist {
             glib::Propagation::Stop
         });
         self.widget.add_controller(keys);
+    }
+
+    /// Fold or unfold the section where the keyboard is, and leave the
+    /// keyboard on its header. A rebuild makes every row new, so without that
+    /// the next arrow key would start from nowhere.
+    fn fold_from_keyboard(self: &Rc<Self>, key: Fold) -> bool {
+        // Renaming a section is typing, and a space in a name is a space.
+        if self.list.root().and_then(|root| root.focus()).is_some_and(|f| f.is::<gtk::Text>()) {
+            return false;
+        }
+        let Some(row) = self.list.focus_child().and_downcast::<gtk::ListBoxRow>() else {
+            return false;
+        };
+        let at = row.index();
+        let target = {
+            let rows = self.rows.borrow();
+            let Some(on) = rows.get(at.max(0) as usize) else { return false };
+            let id = on.section_id();
+            let has_header =
+                rows.iter().any(|kind| matches!(kind, RowKind::Header { section_id } if *section_id == id));
+            fold_target(on, self.is_folded(id), key, has_header)
+        };
+        let Some((id, folded)) = target else { return false };
+        self.fold_section(id, folded);
+        if let Some(row) = self.header_row(id) {
+            row.grab_focus();
+        }
+        true
+    }
+
+    fn is_folded(&self, section_id: i64) -> bool {
+        self.store
+            .watchlist_sections(self.active.get())
+            .iter()
+            .any(|section| section.id == section_id && section.collapsed)
+    }
+
+    /// Fold or unfold a section. Nothing is rebuilt when it is already that way.
+    fn fold_section(self: &Rc<Self>, section_id: i64, folded: bool) {
+        if self.is_folded(section_id) != folded {
+            self.store.set_section_collapsed(section_id, folded);
+            self.rebuild();
+        }
+    }
+
+    fn header_row(&self, section_id: i64) -> Option<gtk::ListBoxRow> {
+        let at = self.rows.borrow().iter().position(
+            |kind| matches!(kind, RowKind::Header { section_id: id } if *id == section_id),
+        )?;
+        self.list.row_at_index(at as i32)
     }
 
     /// Remove whatever is highlighted, and leave the highlight where it was so
@@ -1052,10 +1155,7 @@ impl Watchlist {
         arrow.add_css_class("flat");
         arrow.set_valign(gtk::Align::Center);
         let this = self.clone();
-        arrow.connect_clicked(move |_| {
-            this.store.set_section_collapsed(id, !collapsed);
-            this.rebuild();
-        });
+        arrow.connect_clicked(move |_| this.fold_section(id, !collapsed));
 
         let label = gtk::Label::new(Some(name));
         label.set_xalign(0.0);
@@ -1113,7 +1213,8 @@ impl Watchlist {
 
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&header));
-        // Headers are scenery: the arrow keys walk past them.
+        // A header takes the keyboard but never the selection: an arrow key
+        // stops on one without loading anything, and ← → Enter fold it.
         row.set_selectable(false);
         row.set_activatable(false);
 
@@ -2326,6 +2427,41 @@ mod tests {
         assert_ne!(one, two, "held by id, so the name may repeat");
 
         assert_eq!(promote_section_in(&store, DEFAULT_WATCHLIST, 9_999, "Nowhere"), None);
+    }
+
+    /// ← folds, → unfolds and Enter flips the header the keyboard is on, and
+    /// ← on a symbol folds its section — but only a section with a header to
+    /// land on. Everything else is the list's, so arrows still walk the rail.
+    #[test]
+    fn folding_keys_act_on_the_header_or_the_section_a_symbol_is_in() {
+        let header = RowKind::Header { section_id: 3 };
+        assert_eq!(fold_target(&header, false, Fold::Close, true), Some((3, true)));
+        assert_eq!(fold_target(&header, true, Fold::Open, true), Some((3, false)));
+        assert_eq!(fold_target(&header, true, Fold::Toggle, true), Some((3, false)));
+        assert_eq!(fold_target(&header, false, Fold::Toggle, true), Some((3, true)));
+
+        let symbol = RowKind::Entry {
+            section_id: 3,
+            entry: Entry { symbol: "CL".into(), suffix: None },
+            instrument: Instrument {
+                symbol: "CL".into(),
+                name: "Crude oil".into(),
+                kind: omacharts_engine::InstrumentKind::FutureRoot,
+                suffix: None,
+                currency: None,
+                tier: 1,
+                session_origin: 0,
+                overrides: Vec::new(),
+                exchange: None,
+                popularity: 0,
+                local_name: None,
+            },
+            cells: Vec::new(),
+        };
+        assert_eq!(fold_target(&symbol, false, Fold::Close, true), Some((3, true)));
+        assert_eq!(fold_target(&symbol, false, Fold::Close, false), None, "no header to fold to");
+        assert_eq!(fold_target(&symbol, false, Fold::Open, true), None);
+        assert_eq!(fold_target(&symbol, false, Fold::Toggle, true), None, "Enter stays the symbol's");
     }
 
     /// A handful of lists, so running off one end should land on the other
