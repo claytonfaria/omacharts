@@ -1978,18 +1978,44 @@ fn draw_pane(
     }
 
     // Each line's latest value on the axis, in the line's own colour, as the
-    // last price is. The main line's last, so it is the one on top when the
-    // two meet.
+    // last price is.
     let decimals = pane_decimals(pane, low, high, height);
-    let lines = signal.iter().map(|(series, colour)| (*series, colour.as_str()));
-    for (series, colour) in lines.chain([(&pane.values, drawn.color.as_str())]) {
-        let Some(last) = series.iter().rev().find_map(|value| *value) else { continue };
-        let y = to_y(last);
-        if y < top || y > top + height {
-            continue;
+    let lines = [(&pane.values, drawn.color.as_str())]
+        .into_iter()
+        .chain(signal.iter().map(|(series, colour)| (*series, colour.as_str())));
+    let mut chips: Vec<(f64, String, &str)> = lines
+        .filter_map(|(series, colour)| {
+            let last = series.iter().rev().find_map(|value| *value)?;
+            let y = to_y(last);
+            (y >= top && y <= top + height).then(|| (y, format!("{last:.decimals$}"), colour))
+        })
+        .collect();
+    chips.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut ys: Vec<f64> = chips.iter().map(|chip| chip.0).collect();
+    spread_chips(&mut ys, AXIS_CHIP_H, top + height);
+    for ((_, text, colour), y) in chips.iter().zip(ys) {
+        label_on_axis(cr, state, text, plot_x + plot_w, y.round() + 0.5, width, colour);
+    }
+}
+
+/// How tall a chip on the axis is.
+const AXIS_CHIP_H: f64 = 16.0;
+
+/// Move chips apart that would overlap, keeping their order.
+///
+/// `ys` are the chips' centres, top to bottom. A chip too close to the one
+/// above it is pushed down until they just touch; if that pushes the last one
+/// past `floor`, the run is lifted back by the overshoot, so two lines at the
+/// bottom of a strip still get two readable chips inside it.
+fn spread_chips(ys: &mut [f64], gap: f64, floor: f64) {
+    for at in 1..ys.len() {
+        ys[at] = ys[at].max(ys[at - 1] + gap);
+    }
+    let overshoot = ys.last().map_or(0.0, |last| last + gap / 2.0 - floor);
+    if overshoot > 0.0 {
+        for y in ys.iter_mut() {
+            *y -= overshoot;
         }
-        let text = format!("{last:.decimals$}");
-        label_on_axis(cr, state, &text, plot_x + plot_w, y.round() + 0.5, width, colour);
     }
 }
 
@@ -2235,7 +2261,7 @@ fn label_on_axis(
     cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
     cr.set_font_size(11.0);
     let Ok(extents) = cr.text_extents(text) else { return };
-    let h = 16.0;
+    let h = AXIS_CHIP_H;
     let w = (extents.width() + 10.0).min(width - axis_x - 2.0);
     colors::set_source(cr, colour);
     cr.rectangle(axis_x + 1.0, y - h / 2.0, w, h);
@@ -3062,6 +3088,24 @@ mod tests {
         let crosshair = frame(w, h, |cr| draw_pointer(cr, w, h, &state));
         // Two lines across a 600x400 chart, and the chips at the ends of them.
         assert!(painted(&crosshair) > 500, "the crosshair drew {} pixels", painted(&crosshair));
+    }
+
+    #[test]
+    fn chips_that_would_overlap_are_pushed_apart_in_order() {
+        // Close together: the lower one moves down until they just touch.
+        let mut ys = [100.0, 104.0];
+        spread_chips(&mut ys, 16.0, 300.0);
+        assert_eq!(ys, [100.0, 116.0]);
+
+        // Far apart: nothing moves.
+        let mut ys = [100.0, 140.0];
+        spread_chips(&mut ys, 16.0, 300.0);
+        assert_eq!(ys, [100.0, 140.0]);
+
+        // At the bottom of the strip: both lift so the lower stays inside it.
+        let mut ys = [295.0, 296.0];
+        spread_chips(&mut ys, 16.0, 300.0);
+        assert_eq!(ys, [276.0, 292.0]);
     }
 
     /// A strip's name is written in its top 13 pixels or so; the top of its
