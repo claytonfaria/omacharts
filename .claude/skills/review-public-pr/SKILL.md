@@ -148,6 +148,45 @@ and offer to merge the documentation hunk alone. That is the real fix.
   before and after rather than guessing, and say the numbers.
 - **No gratuitous reformatting** of code the PR did not otherwise touch.
 
+## When the PR adds or changes an indicator
+
+An indicator is maths that runs on every bar of every chart that shows it,
+inside the draw path. Three things to establish, each with evidence in the
+report, before the shape of the code is even discussed:
+
+**Correct.** Check the formula against a reference — TradingView's `ta.*`
+definitions are what users compare against — with a hand-computed example
+or a small test you write, not by reading the code and nodding. Count the
+warm-up: how many leading `None`s the formula requires, and that the code
+produces exactly that many. Check alignment: value *i* describes bar *i*
+(an off-by-one here is the classic indicator bug and it looks plausible on
+a chart). Degenerate windows have a defined answer — a zero range is no
+value, not 50; a flat average is no value, not infinity. And it follows the
+conventions the existing indicators use: the same `Option`/warm-up
+handling, the same output type, parameters read the same way.
+
+**Performant.** One pass with a sliding window: rolling sums, a monotonic
+deque or equivalent for a window's highest and lowest. Recomputing the
+window for every bar is O(n·window) and is the thing to look for; so is
+a per-bar allocation, and work done on every redraw that only changes
+when the bars do. Measure it rather than reason about it: time the
+indicator over a 10k-bar and a 100k-bar synthetic series (an ignored test
+is fine) and quote the numbers beside RSI's on the same series.
+
+**Robust.** Feed it the edges and say what happened: an empty series; a
+series shorter than the window; window 0 and 1; smoothing 0 and 1; a flat
+window at the start and in the middle; NaN or infinite highs and lows; a
+bar with high below low; parameters from the CLI that are negative or out
+of range, which must be refused with a usage error rather than produce
+garbage; and a very long series, comparing a rolled sum to a fresh
+recomputation at the end for drift. Nothing may panic: a panic inside a
+draw callback does not unwind, it takes the whole app with it.
+
+A new indicator that also reworks the shared strip code is two PRs, and
+the shared half is the riskier one — it changes what RSI and ATR look
+like for everyone. Compare their screenshots and CLI output on `main`
+and on the branch before saying it is harmless.
+
 ## Review with simplifying in mind
 
 Standing instruction from the owner: keep things simple, and review with
