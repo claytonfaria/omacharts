@@ -120,6 +120,20 @@ XDG_DATA_HOME=$(mktemp -d) DBUS_SESSION_BUS_ADDRESS= ./target/debug/omacharts �
 nothing and will write to the real profile. Blanking the bus address keeps
 the command local instead of forwarding it to a running window.
 
+Driving the window itself, when a claim needs it: launch with
+`GDK_BACKEND=x11` so `xdotool` can reach it, find it with `xdotool search
+--pid <pid> --onlyvisible | tail -1`, and capture its own pixels with
+`import -window <id> out.png`, which works whatever is on top and whatever
+workspace it is on. Keyboard reaches it that way; the pointer does not,
+so do not rely on clicks. Two things that have gone wrong: a window
+launched on the owner's active workspace takes his focus, and his next
+keystrokes land in your throwaway app — launch it on a special workspace
+or refuse to type unless your window is the active one; and this
+Hyprland's `hyprctl dispatch` takes Lua, not the old strings —
+`hyprctl dispatch 'hl.dispatch(hl.dsp.focus({window="address:0x…"}))'`,
+`hl.dsp.exec_cmd("[workspace special:x silent] cmd")` — and the old
+syntax fails silently when its output is discarded.
+
 ## Ask whether the app already does it
 
 The most useful question in this repo is usually "can you do that today?".
