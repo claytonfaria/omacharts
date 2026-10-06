@@ -1890,12 +1890,16 @@ fn pane_decimals(pane: &omacharts_engine::indicators::Pane, low: f64, high: f64,
 /// chose one, otherwise the theme's companion to the main line, as a point of
 /// control is.
 fn signal_colour(state: &State, drawn: &Drawn) -> String {
-    match &drawn.indicator.params {
-        omacharts_engine::Params::Stochastic { d_color: Some(choice), .. } => {
-            choice.resolve(&state.theme)
-        }
-        _ => state.theme.companion(&drawn.color),
-    }
+    let chosen = match &drawn.indicator.params {
+        omacharts_engine::Params::Stochastic { d_color, .. } => d_color.as_ref(),
+        _ => None,
+    };
+    state.theme.companion_or(chosen, &drawn.color)
+}
+
+/// The part of a per-bar series that is on screen.
+fn on_screen<T>(series: &[T], first: usize, visible: usize) -> &[T] {
+    &series[first.min(series.len())..(first + visible).min(series.len())]
 }
 
 /// One indicator in its own strip: guides, then the line.
@@ -1917,8 +1921,8 @@ fn draw_pane(
 ) {
     let plot_x = columns.plot_x;
     let (first, visible) = (columns.first, columns.visible);
-    let values = &pane.values[first.min(pane.values.len())..(first + visible).min(pane.values.len())];
-    let Some((low, high)) = pane_range(pane, first, visible) else { return };
+    let values = on_screen(&pane.values, first, visible);
+    let Some((low, high)) = pane_range(pane, values) else { return };
     let (inner_top, inner_h) = pane_plot(top, height);
     let to_y = |value: f64| inner_top + inner_h * (high - value) / (high - low);
 
@@ -1973,8 +1977,7 @@ fn draw_pane(
     stroke_pane_line(cr, stroke, &drawn.color, values, columns, &strip);
     let signal = pane.signal.as_ref().map(|signal| (signal, signal_colour(state, drawn)));
     if let Some((signal, colour)) = &signal {
-        let signal = &signal[first.min(signal.len())..(first + visible).min(signal.len())];
-        stroke_pane_line(cr, stroke, colour, signal, columns, &strip);
+        stroke_pane_line(cr, stroke, colour, on_screen(signal, first, visible), columns, &strip);
     }
 
     // Each line's latest value on the axis, in the line's own colour, as the
@@ -1983,18 +1986,31 @@ fn draw_pane(
     let lines = [(&pane.values, drawn.color.as_str())]
         .into_iter()
         .chain(signal.iter().map(|(series, colour)| (*series, colour.as_str())));
-    let mut chips: Vec<(f64, String, &str)> = lines
+    let chips = lines
         .filter_map(|(series, colour)| {
             let last = series.iter().rev().find_map(|value| *value)?;
             let y = to_y(last);
             (y >= top && y <= top + height).then(|| (y, format!("{last:.decimals$}"), colour))
         })
         .collect();
+    draw_axis_chips(cr, state, chips, plot_x + plot_w, top + height, width);
+}
+
+/// Chips on the axis at their own heights, moved apart where they would cover
+/// each other, and kept above `floor`.
+fn draw_axis_chips(
+    cr: &cairo::Context,
+    state: &State,
+    mut chips: Vec<(f64, String, &str)>,
+    axis_x: f64,
+    floor: f64,
+    width: f64,
+) {
     chips.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut ys: Vec<f64> = chips.iter().map(|chip| chip.0).collect();
-    spread_chips(&mut ys, AXIS_CHIP_H, top + height);
+    spread_chips(&mut ys, AXIS_CHIP_H, floor);
     for ((_, text, colour), y) in chips.iter().zip(ys) {
-        label_on_axis(cr, state, text, plot_x + plot_w, y.round() + 0.5, width, colour);
+        label_on_axis(cr, state, text, axis_x, y.round() + 0.5, width, colour);
     }
 }
 
@@ -2025,8 +2041,7 @@ fn spread_chips(ys: &mut [f64], gap: f64, floor: f64) {
 /// scale it was drawn on, or the number on the axis is not the line under it.
 fn pane_range(
     pane: &omacharts_engine::indicators::Pane,
-    first: usize,
-    visible: usize,
+    values: &[Option<f64>],
 ) -> Option<(f64, f64)> {
     if let Some(bounds) = pane.bounds {
         return Some(bounds);
@@ -2034,7 +2049,6 @@ fn pane_range(
     // Every visible value, not one per column: what the strip is scaled to has
     // to be the range the line actually covers, or a peak that falls between
     // two columns would push the line off the top of its own strip.
-    let values = &pane.values[first.min(pane.values.len())..(first + visible).min(pane.values.len())];
     // Fit what is on screen, with a little air: an ATR pressed against the
     // top and bottom of its strip has no shape to read.
     let mut low = f64::MAX;
@@ -2233,7 +2247,9 @@ fn draw_pane_value(
     else {
         return;
     };
-    let Some((low, high)) = pane_range(pane, first, visible) else { return };
+    let Some((low, high)) = pane_range(pane, on_screen(&pane.values, first, visible)) else {
+        return;
+    };
     let (inner_top, inner_h) = pane_plot(row.top, row.height);
     let value = high - (py - inner_top) / inner_h * (high - low);
     let decimals = pane_decimals(pane, low, high, row.height);
@@ -2486,12 +2502,11 @@ fn draw_profiles(
     columns: &Columns,
     to_y: &impl Fn(f64) -> f64,
 ) {
-    let poc = match &drawn.indicator.params {
-        omacharts_engine::Params::VolumeProfile { poc_color: Some(choice), .. } => {
-            choice.resolve(&state.theme)
-        }
-        _ => state.theme.companion(&drawn.color),
+    let chosen = match &drawn.indicator.params {
+        omacharts_engine::Params::VolumeProfile { poc_color, .. } => poc_color.as_ref(),
+        _ => None,
     };
+    let poc = state.theme.companion_or(chosen, &drawn.color);
 
     let (first, last) = (columns.first, columns.first + columns.visible);
     for profile in profiles {

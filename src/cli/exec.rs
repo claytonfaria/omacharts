@@ -1538,11 +1538,12 @@ fn describe_indicator(stored: &Value) -> String {
         .find(|k| k.key() == kind)
         .map(|k| k.short_name().to_string())
         .unwrap_or_else(|| kind.to_string());
-    let params = &stored["params"];
-    match (params["period"].as_u64(), params["k_smooth"].as_u64(), params["d_period"].as_u64()) {
-        (Some(period), Some(k), Some(d)) => text.push_str(&format!("({period},{k},{d})")),
-        (Some(period), ..) => text.push_str(&format!("({period})")),
-        _ => {}
+    let lengths: Vec<String> = ["period", "k_smooth", "d_period"]
+        .iter()
+        .filter_map(|key| stored["params"][key].as_u64().map(|n| n.to_string()))
+        .collect();
+    if !lengths.is_empty() {
+        text.push_str(&format!("({})", lengths.join(",")));
     }
     if let Some(reset) = stored["params"]["reset"].as_str() {
         text.push_str(&format!(" · {reset}"));
@@ -1666,15 +1667,16 @@ impl Edits {
                 false => return Err(refuse("period")),
             }
         }
-        for (key, value, what) in [
-            ("k_smooth", self.k_smooth, "%K smoothing"),
-            ("d_period", self.d_period, "%D smoothing"),
-        ] {
-            if let Some(value) = value {
-                match kind == IndicatorKind::Stochastic {
-                    true => params[key] = json!(value.max(1)),
-                    false => return Err(refuse(what)),
-                }
+        if let Some(bars) = self.k_smooth {
+            match params.get("k_smooth").is_some() {
+                true => params["k_smooth"] = json!(bars.max(1)),
+                false => return Err(refuse("%K smoothing")),
+            }
+        }
+        if let Some(bars) = self.d_period {
+            match params.get("d_period").is_some() {
+                true => params["d_period"] = json!(bars.max(1)),
+                false => return Err(refuse("%D smoothing")),
             }
         }
         if let Some(colour) = &self.d_color {
