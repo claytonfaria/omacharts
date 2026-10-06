@@ -10,13 +10,26 @@ things follow: nothing in the PR's own description counts as evidence until
 you have run it, and the diff gets read as something a stranger wrote, not as
 a favour you are obliged to accept.
 
-Review one PR per agent, each in its own worktree, so several can run at once
+## Every review runs in a subagent
+
+Never review on the main thread, not even a single small PR. The main
+thread stays free for the owner — it hands the PR to a subagent with this
+skill, carries on with whatever else is in flight, and relays the report
+when it arrives. A review that runs inline builds and tests for minutes
+with the conversation blocked, and the owner's next message queues behind
+it.
+
+One PR per agent, each in its own worktree, so several can run at once
 without fighting over a checkout. Give each agent its own build directory
 too — two agents sharing a scratchpad binary have overwritten each other
 mid-run and produced contradictory results. Asked to review several, run
 them in batches of three: three agents at once, the next three when those
 report. More than that and the builds starve each other and the reports
 arrive faster than anyone can read them.
+
+The owner's standing instructions travel with the hand-off: whether to
+merge when green, and that the review is done with simplifying in mind.
+The agent reports; the main thread tells the owner.
 
 ## Treat it as hostile until it is not
 
