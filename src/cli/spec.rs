@@ -62,6 +62,48 @@ impl Flag {
     }
 }
 
+/// An option to the launch itself rather than to a command.
+///
+/// Here because this file is the only place allowed to describe the surface,
+/// and a launch option is part of it: it appears in `--help`, in the
+/// completions, in the man page and in `surface --json` because it is in this
+/// table, and for no other reason. The alternative is what this replaced — an
+/// environment variable, which no help output can list and no completion can
+/// offer, and which an agent therefore cannot find.
+///
+/// There are no switches here, only options that take a value, because the
+/// one thing a launch option has ever been needed for is naming something.
+pub struct Launch {
+    pub long: &'static str,
+    pub value: &'static str,
+    pub help: &'static str,
+    /// The values it accepts, when they are a fixed set this file knows. Some
+    /// are not: the feeds come from the engine's catalogue, so they are read
+    /// from there by [`launch_values`] rather than copied into a second list
+    /// that can disagree with the first.
+    pub values: &'static [&'static str],
+}
+
+pub const LAUNCH: &[Launch] = &[Launch {
+    long: "provider",
+    value: "NAME",
+    help: "chart from this data feed for this launch, whatever is stored; \
+           `config set provider` changes the stored default",
+    values: &[],
+}];
+
+/// Everything `--long` accepts, including the sets this table defers on.
+pub fn launch_values(long: &str) -> Vec<&'static str> {
+    match long {
+        "provider" => omacharts_engine::providers::LISTED.iter().map(|feed| feed.id).collect(),
+        _ => LAUNCH
+            .iter()
+            .find(|option| option.long == long)
+            .map(|option| option.values.to_vec())
+            .unwrap_or_default(),
+    }
+}
+
 pub struct Verb {
     pub name: &'static str,
     pub about: &'static str,
@@ -97,6 +139,22 @@ pub struct Noun {
     pub local: bool,
     pub verbs: &'static [Verb],
 }
+
+/// The verbs that run in the process they were typed in, whatever is open.
+///
+/// [`Noun::local`] says the same thing for a whole noun, and most of the
+/// reasons are a noun's: `skill` describes the caller's machine. These two
+/// are a verb's own, and the reason is different — a sign-in sits in a
+/// browser window waiting for a person to type a password and read a code
+/// off their phone, and a command handed to the window runs *inside* its
+/// main loop. That is ten minutes of frozen application, with the browser
+/// it is waiting for sitting on top of it. `logout` joins it so that the
+/// pair behave alike, and because neither touches the database.
+///
+/// A table rather than a field on every verb: forty verbs saying "no" to
+/// make two say "yes" is a worse description of the surface than one list
+/// of the exceptions with the reason written on it.
+pub const IN_THE_CALLER: &[(&str, &str)] = &[("provider", "login"), ("provider", "logout")];
 
 /// How a watchlist, section or chartbook is named on the command line.
 pub const SELECTOR: &str =
@@ -675,6 +733,53 @@ pub const SURFACE: &[Noun] = &[
         ],
     },
     Noun {
+        name: "provider",
+        about: "The data feed the charts come from",
+        local: false,
+        verbs: &[
+            Verb {
+                name: "list",
+                about: "Every feed, which one is stored, and which one this process is using",
+                args: &[],
+                flags: &[],
+                example: "omacharts provider list --json",
+                json: true,
+                writes: false,
+                workspace: false,
+            },
+            Verb {
+                name: "status",
+                about: "The chosen feed, and whether it is signed in and ready",
+                args: &[],
+                flags: &[],
+                example: "omacharts provider status",
+                json: true,
+                writes: false,
+                workspace: false,
+            },
+            Verb {
+                name: "login",
+                about: "Sign in to the chosen feed, in a browser window you drive yourself",
+                args: &[Arg::opt("NAME", "the feed to sign in to (default: the stored one)")],
+                flags: &[],
+                example: "omacharts provider login",
+                json: true,
+                writes: false,
+                workspace: false,
+            },
+            Verb {
+                name: "logout",
+                about: "Forget the saved session for a feed",
+                args: &[Arg::opt("NAME", "the feed to sign out of (default: the stored one)")],
+                flags: &[],
+                example: "omacharts provider logout",
+                json: true,
+                writes: false,
+                workspace: false,
+            },
+        ],
+    },
+    Noun {
         name: "config",
         about: "Stored preferences",
         local: false,
@@ -892,6 +997,23 @@ mod tests {
         LineStyle, MAX_FILL_ALPHA, MAX_PANE_SHARE, MIN_FILL_ALPHA, MIN_PANE_SHARE,
     };
     use omacharts_engine::{link, BarStyle, IndicatorKind, Reset, Session, Timeframe};
+
+    /// The group table in `doc/cli.md` is written by hand — it is the one
+    /// part of the documentation this table does not generate, because it
+    /// says what each group is *for* rather than what it accepts. So it can
+    /// fall behind, and it did: the `provider` group was added here and to
+    /// nowhere a reader would look for a list of them.
+    #[test]
+    fn every_group_has_a_row_in_the_documentation() {
+        let doc = include_str!("../../doc/cli.md");
+        for noun in SURFACE {
+            assert!(
+                doc.contains(&format!("| `{}` |", noun.name)),
+                "doc/cli.md has no row for the {:?} group",
+                noun.name
+            );
+        }
+    }
 
     #[test]
     fn the_bar_styles_on_offer_are_the_ones_that_exist() {

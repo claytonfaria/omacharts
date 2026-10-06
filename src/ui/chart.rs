@@ -845,6 +845,26 @@ impl ChartView {
         self.redraw();
     }
 
+    /// Put live bars into the series in place: each replaces the bar with
+    /// its timestamp or joins the end, and nothing else about the chart
+    /// moves. A view anchored to the right edge follows a new bar on its
+    /// own, because the anchor is a fact about the series' end rather than
+    /// an index; a view panned into history stays where it is.
+    ///
+    /// A bar arriving is also proof the feed is alive, so whatever the
+    /// corner was saying about the last fetch stops being true.
+    pub fn apply_tail(&self, tail: &[Bar]) {
+        {
+            let mut state = self.state.borrow_mut();
+            for bar in tail {
+                omacharts_engine::stream::upsert(&mut state.bars, *bar);
+            }
+            state.trouble = None;
+            state.loading = false;
+        }
+        self.redraw();
+    }
+
     /// Show or hide the gridlines. The axes and their labels stay: without
     /// them a chart is a shape with no scale.
     pub fn set_show_grid(&self, show: bool) {
@@ -973,6 +993,14 @@ impl ChartView {
 
     pub fn bar_count(&self) -> usize {
         self.state.borrow().bars.len()
+    }
+
+    /// Read the series as the chart holds it, without copying it.
+    ///
+    /// `read` must not reach back into the chart: the state is borrowed for
+    /// its duration, and a `set_indicators` from inside it would be a panic.
+    pub fn with_bars<T>(&self, read: impl FnOnce(&[Bar]) -> T) -> T {
+        read(&self.state.borrow().bars)
     }
 
     /// Jump back to the right edge and follow new bars again.
@@ -2861,6 +2889,14 @@ mod tests {
     #[test]
     fn a_retry_in_flight_outranks_the_failure_it_is_retrying() {
         assert_eq!(placeholder_text(true, true, Some(FetchFailure::Unreachable)), "Loading…");
+        // A symbol the chosen feed has no name for. It used to be a click
+        // that did nothing at all — the chart kept the previous symbol and
+        // said nothing — so the one thing this must not be is silence or
+        // "No data for this symbol", which blames the ticker.
+        let unserved = placeholder_text(true, false, Some(FetchFailure::Unserved));
+        assert_eq!(unserved, FetchFailure::Unserved.message());
+        assert!(unserved.contains("cannot chart this symbol"), "{unserved}");
+        assert_ne!(unserved, FetchFailure::NoSuchSymbol.message());
     }
 
     #[test]

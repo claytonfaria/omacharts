@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use omacharts_engine::indicators::{
     LineStyle, Stroke, MAX_FILL_ALPHA, MAX_PANE_SHARE, MIN_FILL_ALPHA, MIN_PANE_SHARE,
 };
+use omacharts_engine::providers;
 use omacharts_engine::theme::{
     ColorChoice, SWATCH_NAMES, THEME_BARS_ID, THEME_MONO_ID, THEME_RED_UP_ID,
 };
@@ -143,9 +144,25 @@ pub fn dispatch(
             charts_verb(store, noun, verb, m, json)
         }
 
+        ("provider", "list") => provider_list(store, json),
+        ("provider", "status") => provider_status(store, live, json),
+        ("provider", "login") => provider_login(store, m, json),
+        ("provider", "logout") => provider_logout(store, m, json),
+
         ("config", "list") => config_list(store, json),
         ("config", "get") => config_get(store, m, json),
-        ("config", "set") => config_set(store, m, json),
+        ("config", "set") => {
+            let outcome = config_set(store, m, json);
+            // The feed is the one setting a window acts on the moment it
+            // changes: the charts switch, with nothing to restart.
+            if outcome.is_ok()
+                && required(m, "KEY").is_ok_and(|key| key == crate::feeds::SETTING)
+                && let Some(live) = live
+            {
+                live.adopt_feed();
+            }
+            outcome
+        }
         ("config", "bars") => config_bars(store, m, json, live),
 
         ("plugin", "status") => plugin_status(json),
@@ -2006,6 +2023,325 @@ fn crosshair(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<Strin
 
 // -- settings and cache ---------------------------------------------------
 
+/// Which feeds there are, which is stored, and which this process is using.
+///
+/// The three can differ: a launch given `--provider` is using one while
+/// another is stored, and that is worth seeing at a glance rather than
+/// being a thing somebody discovers from a chart.
+fn provider_list(store: &Store, as_json: bool) -> Result<String, Fault> {
+    let stored = crate::feeds::stored(store).id;
+    let in_use = crate::feeds::in_use(store).id;
+    if as_json {
+        let rows = providers::LISTED
+            .iter()
+            .map(|feed| {
+                json!({
+                    "id": feed.id,
+                    "label": feed.label,
+                    "serves": feed.serves,
+                    "freshness": providers::freshness(feed.id),
+                    "delivery": providers::selected(Some(feed.id)).delivery().word(),
+                    "stored": feed.id == stored,
+                    "inUse": feed.id == in_use,
+                    "needsSignIn": feed.needs_sign_in(),
+                    "experimental": feed.experimental,
+                    "session": providers::access(feed.id).map(|access| access.line()),
+                })
+                .to_string()
+            })
+            .collect();
+        return Ok(wrap_list("providers", rows));
+    }
+    Ok(providers::LISTED
+        .iter()
+        .map(|feed| {
+            let mut note = match (feed.id == stored, feed.id == in_use) {
+                (true, true) => "in use".to_string(),
+                (true, false) => "stored, not in use".to_string(),
+                (false, true) => "in use, not stored".to_string(),
+                (false, false) => String::new(),
+            };
+            if let Some(access) = providers::access(feed.id) {
+                if !note.is_empty() {
+                    note.push_str(" · ");
+                }
+                note.push_str(&access.line().to_lowercase());
+            }
+            // The word rides with what the feed serves rather than with
+            // the note beside it: it is a fact about the feed, true whether
+            // or not this machine is using it.
+            let mut serves = providers::described(feed);
+            if feed.experimental {
+                serves.push_str(" · experimental");
+            }
+            format!("{:<8} {} · {}{}", feed.id, feed.label, serves, suffixed(&note))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n")
+}
+
+fn suffixed(note: &str) -> String {
+    match note.is_empty() {
+        true => String::new(),
+        false => format!("   ({note})"),
+    }
+}
+
+/// The chosen feed in detail: is it ready, if not what is missing, how it
+/// delivers bars, and what is being streamed right now.
+///
+/// The settings panel says none of this in words — it offers one action,
+/// and which one it is says whether a session exists — so this is where the
+/// session, the files it lives in and the state of every subscription are
+/// spelled out for somebody who needs them.
+fn provider_status(store: &Store, live: Option<&dyn Live>, as_json: bool) -> Result<String, Fault> {
+    let stored = crate::feeds::stored(store);
+    let in_use = crate::feeds::in_use(store);
+    let access = providers::access(in_use.id);
+    let browser = providers::can_sign_in(in_use.id);
+    let places = providers::places(in_use.id);
+    let delivery = providers::selected(Some(in_use.id)).delivery();
+    let streaming = live.map(|live| live.streaming());
+
+    if as_json {
+        return Ok(format!(
+            "{}\n",
+            json!({
+                "id": in_use.id,
+                "label": in_use.label,
+                "serves": in_use.serves,
+                "freshness": providers::freshness(in_use.id),
+                "delivery": delivery.word(),
+                "subscriptions": streaming.as_deref().map(|reports| {
+                    reports.iter().map(subscription_json).collect::<Vec<_>>()
+                }),
+                "stored": stored.id,
+                "forThisLaunch": crate::feeds::for_this_launch().map(|feed| feed.id),
+                "needsSignIn": in_use.needs_sign_in(),
+                "ready": access.as_ref().map(|access| access.ready()).unwrap_or(true),
+                "session": access.as_ref().map(|access| access.line()),
+                "browser": browser.as_ref().ok(),
+                "cannotSignIn": browser.as_ref().err(),
+                "files": places
+                    .iter()
+                    .map(|(what, path)| json!({"what": what, "path": path}))
+                    .collect::<Vec<_>>(),
+            })
+        ));
+    }
+
+    let mut out = format!("{} · {}\n", in_use.label, providers::described(in_use));
+    if stored.id != in_use.id {
+        out.push_str(&format!(
+            "in use in the open window; {} is stored\n",
+            stored.label
+        ));
+    }
+    match &access {
+        None => out.push_str("nothing to sign in to; it works as it is\n"),
+        Some(access) => {
+            out.push_str(&format!("{}\n", access.line()));
+            if !access.ready() {
+                out.push_str("charts will be empty until you sign in: omacharts provider login\n");
+            }
+        }
+    }
+    if let Err(why) = &browser
+        && in_use.needs_sign_in()
+    {
+        out.push_str(&format!("{why}\n"));
+    }
+    for (what, path) in places {
+        out.push_str(&format!("{}: {path}\n", what.to_lowercase()));
+    }
+    for line in streaming_lines(delivery, streaming.as_deref()) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// How bars reach a chart, and — for a feed that streams — what the window
+/// holds a subscription to right now.
+///
+/// Honest about what has and has not arrived. A subscription that is open
+/// with nothing ticked says so, rather than implying data is flowing: with
+/// the market shut that is the normal state of a live chart, and the one
+/// thing somebody checking whether streaming works needs to be told.
+fn streaming_lines(delivery: omacharts_engine::Delivery, streaming: Option<&[crate::live::Report]>) -> Vec<String> {
+    use omacharts_engine::Delivery;
+    let mut lines = Vec::new();
+    match delivery {
+        Delivery::Polled => {
+            lines.push("delivery: polled — charts are refetched on a timer".into());
+            return lines;
+        }
+        Delivery::Streamed => {
+            lines.push(
+                "delivery: streamed — bars arrive as they print, and nothing fetches on a timer"
+                    .into(),
+            );
+        }
+    }
+    match streaming {
+        None => lines.push("no window is open, so nothing is subscribed".into()),
+        Some([]) => lines.push("nothing is being streamed: no chart is showing this feed".into()),
+        Some(reports) => {
+            lines.push(format!(
+                "streaming {} series:",
+                reports.len()
+            ));
+            for report in reports {
+                lines.push(format!("  {}", subscription_line(report)));
+            }
+        }
+    }
+    lines
+}
+
+/// One subscription, in one line.
+fn subscription_line(report: &crate::live::Report) -> String {
+    use crate::live::ReportState;
+
+    let charts = match report.charts {
+        1 => "1 chart".to_string(),
+        n => format!("{n} charts"),
+    };
+    let mut line = format!("{} {} · {charts}", report.symbol, report.native.key());
+    match &report.state {
+        ReportState::Opening => line.push_str(" · waiting for the first snapshot"),
+        ReportState::Live => {
+            line.push_str(&format!(" · {} bars", report.bars));
+            if let Some(ts) = report.last_bar {
+                line.push_str(&format!(" · last bar {}", when(ts)));
+            }
+            match report.updated_ago {
+                Some(ago) => line.push_str(&format!(" · updated {} ago", ago_text(ago))),
+                None => line.push_str(" · nothing has arrived since the snapshot"),
+            }
+        }
+        ReportState::Lost { why, retrying } => {
+            line.push_str(&format!(" · lost: {}", why.message()));
+            line.push_str(if *retrying { " · retrying" } else { " · not retrying" });
+        }
+    }
+    line
+}
+
+fn subscription_json(report: &crate::live::Report) -> serde_json::Value {
+    use crate::live::ReportState;
+
+    let (state, why, retrying) = match &report.state {
+        ReportState::Opening => ("opening", None, None),
+        ReportState::Live => ("live", None, None),
+        ReportState::Lost { why, retrying } => ("lost", Some(why.message()), Some(*retrying)),
+    };
+    json!({
+        "symbol": report.symbol,
+        "resolution": report.native.key(),
+        "charts": report.charts,
+        "bars": report.bars,
+        "lastBar": report.last_bar,
+        "updatedSecondsAgo": report.updated_ago.map(|ago| ago.as_secs()),
+        "state": state,
+        "why": why,
+        "retrying": retrying,
+    })
+}
+
+/// A unix second as a clock time in the local zone, which is where the
+/// person reading it is sitting.
+fn when(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|utc| chrono::DateTime::<chrono::Local>::from(utc).format("%H:%M").to_string())
+        .unwrap_or_else(|| ts.to_string())
+}
+
+fn ago_text(ago: std::time::Duration) -> String {
+    let secs = ago.as_secs();
+    if secs < 60 {
+        format!("{secs} s")
+    } else if secs < 3_600 {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{} h", secs / 3_600)
+    }
+}
+
+/// Sign in to a feed, in a browser the person drives themselves.
+///
+/// Runs in the terminal it was typed in — see `spec::IN_THE_CALLER` — and
+/// blocks for as long as the sign-in takes, printing what the browser is
+/// doing to stderr as it goes. The lines go to stderr rather than into the
+/// result because they are progress rather than an answer: `--json` stays
+/// one object on stdout, which is what something parsing this needs.
+fn provider_login(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
+    let feed = named_or_chosen(store, m)?;
+    if !feed.needs_sign_in() {
+        return Err(Fault::refused(format!(
+            "{} needs no signing in; it works as it is",
+            feed.label
+        )));
+    }
+    if let Err(why) = providers::can_sign_in(feed.id) {
+        return Err(Fault::new(super::EXIT_ERROR, why));
+    }
+
+    eprintln!("a browser is opening at {}; sign in there", feed.label);
+    providers::sign_in(feed.id, |line| eprintln!("{line}"))
+        .map_err(|error| Fault::new(super::EXIT_ERROR, error))?;
+
+    let access = providers::access(feed.id).map(|access| access.line());
+    said(
+        as_json,
+        json!({"id": feed.id, "session": access}),
+        format!("signed in to {}", feed.label),
+    )
+}
+
+fn provider_logout(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
+    let feed = named_or_chosen(store, m)?;
+    if !feed.needs_sign_in() {
+        return Err(Fault::refused(format!(
+            "{} has nothing saved to forget",
+            feed.label
+        )));
+    }
+    // Saying what was there beats "ok": somebody signing out twice should
+    // be able to tell the difference.
+    let had = providers::access(feed.id).is_some_and(|access| !matches!(access, providers::Access::Missing));
+    providers::sign_out(feed.id).map_err(|error| Fault::new(super::EXIT_ERROR, error))?;
+    said(
+        as_json,
+        json!({"id": feed.id, "forgotten": had}),
+        match had {
+            true => format!("forgot the saved {} session", feed.label),
+            false => format!("no saved {} session to forget", feed.label),
+        },
+    )
+}
+
+/// The feed a command named, or the one in use.
+fn named_or_chosen(
+    store: &Store,
+    m: &clap::ArgMatches,
+) -> Result<&'static providers::Listed, Fault> {
+    match arg(m, "NAME") {
+        Some(name) => providers::listed(name).ok_or_else(|| {
+            Fault::not_found(format!(
+                "no such data feed: {name:?}; the feeds are {}",
+                feed_names()
+            ))
+        }),
+        None => Ok(crate::feeds::in_use(store)),
+    }
+}
+
+fn feed_names() -> String {
+    providers::LISTED.iter().map(|feed| feed.id).collect::<Vec<_>>().join(", ")
+}
+
 fn config_list(store: &Store, as_json: bool) -> Result<String, Fault> {
     let settings = store.settings();
     if as_json {
@@ -2037,7 +2373,27 @@ fn config_get(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<Stri
 fn config_set(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
     let key = required(m, "KEY")?;
     let value = required(m, "VALUE")?;
-    store.set_setting(key, value);
+
+    // `config set` writes any setting by name, and that is the point of it.
+    // The feed is the one value naming something from a closed set, where a
+    // misspelling is not stored nonsense but a silent fall back to Yahoo —
+    // somebody who typed `thinkorswimm` would chart from the wrong source
+    // and be told it worked. So this one is checked, and stored canonically
+    // so that `TOS` and `tos` are the same choice rather than two.
+    let value = match key == crate::feeds::SETTING {
+        false => value.to_string(),
+        true => providers::listed(value)
+            .ok_or_else(|| {
+                Fault::usage(format!(
+                    "no such data feed: {value:?}; the feeds are {}",
+                    feed_names()
+                ))
+            })?
+            .id
+            .to_string(),
+    };
+
+    store.set_setting(key, &value);
     said(as_json, json!({"key": key, "value": value}), format!("set {key} to {value}"))
 }
 
