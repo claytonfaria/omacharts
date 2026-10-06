@@ -135,13 +135,23 @@ and offer to merge the documentation hunk alone. That is the real fix.
   before and after rather than guessing, and say the numbers.
 - **No gratuitous reformatting** of code the PR did not otherwise touch.
 
-## Simplify before merging
+## Review with simplifying in mind
 
-Standing instruction from the owner: keep things simple. If a PR is good but
-carries something that can go, take it out before it lands rather than filing
-a follow-up — a `pub fn` whose last caller was in the change itself, a
-negated guard that hides the common case, a comment that stopped being true
-when the feature grew a third answer.
+Standing instruction from the owner: keep things simple, and review with
+that as an angle of its own, every time. Of every hunk, ask whether the
+same outcome could be had with less — fewer lines, no new concept, an
+existing path reused instead of a parallel one built beside it, a flag
+instead of a subcommand, a test beside the code instead of a harness. Ask
+it of the small PRs too; a three-line change that adds a second way of
+doing something the app already does is the usual way complexity gets in.
+The answer goes in the report whether or not the PR lands as it is.
+
+If a PR is good but carries something that can go, take it out before it
+lands rather than filing a follow-up — a `pub fn` whose last caller was in
+the change itself, a negated guard that hides the common case, a comment
+that stopped being true when the feature grew a third answer. When the
+smaller version is a different shape from what the contributor wrote, write
+it, push it to their branch, and say so in the thanks.
 
 Anything written here matches the house style: comments explain *why*, doc
 comments read as prose, commit subjects are imperative sentences
