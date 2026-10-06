@@ -1485,6 +1485,7 @@ fn draw_pointer(cr: &cairo::Context, width: f64, height: f64, state: &State) {
             cr, state, px, py, plan.plot_x, plan.plot_w, plan.top, plan.price_y, plan.price_h,
             width, height, bar_w, first, low, high,
         );
+        draw_pane_value(cr, state, &plan, px, py, first, visible, width);
     }
 
     // Another chart's pointer, if nothing is pointing at this one. The real
@@ -1878,32 +1879,8 @@ fn draw_pane(
 ) {
     let plot_x = columns.plot_x;
     let (first, visible) = (columns.first, columns.visible);
-    // Every visible value, not one per column: what the strip is scaled to has
-    // to be the range the line actually covers, or a peak that falls between
-    // two columns would push the line off the top of its own strip.
     let values = &pane.values[first.min(pane.values.len())..(first + visible).min(pane.values.len())];
-    let (low, high) = match pane.bounds {
-        Some(bounds) => bounds,
-        // Fit what is on screen, with a little air: an ATR pressed against the
-        // top and bottom of its strip has no shape to read.
-        None => {
-            let mut low = f64::MAX;
-            let mut high = f64::MIN;
-            for value in values.iter().flatten() {
-                low = low.min(*value);
-                high = high.max(*value);
-            }
-            if !low.is_finite() || !high.is_finite() {
-                return;
-            }
-            if (high - low).abs() < f64::EPSILON {
-                (low - 1.0, high + 1.0)
-            } else {
-                let air = (high - low) * 0.12;
-                (low - air, high + air)
-            }
-        }
-    };
+    let Some((low, high)) = pane_range(pane, first, visible) else { return };
     let to_y = |value: f64| top + height * (high - value) / (high - low);
 
     // The band between the guides, so overbought and oversold read as regions
@@ -1948,23 +1925,82 @@ fn draw_pane(
 
     draw_pane_name(cr, state, drawn, plot_x, top);
 
-    // The line last, over its own furniture.
+    // The lines last, over their own furniture.
     let stroke = drawn.indicator.stroke;
     if stroke.is_hidden() {
         return;
     }
+    let strip = |value: f64| to_y(value).clamp(top, top + height);
+    stroke_pane_line(cr, stroke, &drawn.color, values, columns, &strip);
+    if let Some(signal) = &pane.signal {
+        // A stochastic's %D: its own colour if somebody chose one, otherwise
+        // the theme's companion to the main line, as a point of control is.
+        let colour = match &drawn.indicator.params {
+            omacharts_engine::Params::Stochastic { d_color: Some(choice), .. } => {
+                choice.resolve(&state.theme)
+            }
+            _ => state.theme.companion(&drawn.color),
+        };
+        let signal = &signal[first.min(signal.len())..(first + visible).min(signal.len())];
+        stroke_pane_line(cr, stroke, &colour, signal, columns, &strip);
+    }
+}
+
+/// The values a strip's top and bottom stand for, over the bars on screen.
+///
+/// Its own function because the crosshair has to read the strip on the same
+/// scale it was drawn on, or the number on the axis is not the line under it.
+fn pane_range(
+    pane: &omacharts_engine::indicators::Pane,
+    first: usize,
+    visible: usize,
+) -> Option<(f64, f64)> {
+    if let Some(bounds) = pane.bounds {
+        return Some(bounds);
+    }
+    // Every visible value, not one per column: what the strip is scaled to has
+    // to be the range the line actually covers, or a peak that falls between
+    // two columns would push the line off the top of its own strip.
+    let values = &pane.values[first.min(pane.values.len())..(first + visible).min(pane.values.len())];
+    // Fit what is on screen, with a little air: an ATR pressed against the
+    // top and bottom of its strip has no shape to read.
+    let mut low = f64::MAX;
+    let mut high = f64::MIN;
+    for value in values.iter().flatten() {
+        low = low.min(*value);
+        high = high.max(*value);
+    }
+    if !low.is_finite() || !high.is_finite() {
+        return None;
+    }
+    if (high - low).abs() < f64::EPSILON {
+        Some((low - 1.0, high + 1.0))
+    } else {
+        let air = (high - low) * 0.12;
+        Some((low - air, high + air))
+    }
+}
+
+/// One line of a strip, broken wherever the series has no value.
+fn stroke_pane_line(
+    cr: &cairo::Context,
+    stroke: indicators::Stroke,
+    colour: &str,
+    values: &[Option<f64>],
+    columns: &Columns,
+    to_y: &impl Fn(f64) -> f64,
+) {
     cr.save().ok();
     cr.set_line_width(stroke.width);
     cr.set_dash(&stroke.style.dashes(stroke.width), 0.0);
-    colors::set_source(cr, &drawn.color);
+    colors::set_source(cr, colour);
     let mut pen_down = false;
     for at in 0..columns.len() {
         let Some(Some(value)) = values.get(columns.offset(at)) else {
             pen_down = false;
             continue;
         };
-        let x = columns.x(at);
-        let y = to_y(*value).clamp(top, top + height);
+        let (x, y) = (columns.x(at), to_y(*value));
         if pen_down {
             cr.line_to(x, y);
         } else {
@@ -2095,6 +2131,53 @@ fn draw_crosshair(
             let _ = cr.show_text(&label);
         }
     }
+}
+
+/// The value under the pointer on a strip's own scale, on the axis beside it,
+/// the way the price is read off the price plot.
+#[allow(clippy::too_many_arguments)]
+fn draw_pane_value(
+    cr: &cairo::Context,
+    state: &State,
+    plan: &Layout,
+    px: f64,
+    py: f64,
+    first: usize,
+    visible: usize,
+    width: f64,
+) {
+    if px < plan.plot_x || px > plan.plot_x + plan.plot_w {
+        return;
+    }
+    let Some(row) = plan.rows.iter().find(|row| row.pane.is_some() && row.covers(py)) else {
+        return;
+    };
+    let Some(Output::Pane(pane)) = state
+        .indicators
+        .iter()
+        .find(|drawn| Some(drawn.indicator.id) == row.pane)
+        .map(|drawn| &drawn.output)
+    else {
+        return;
+    };
+    let Some((low, high)) = pane_range(pane, first, visible) else { return };
+    let value = high - (py - row.top) / row.height * (high - low);
+    // A fixed scale is a percentage-like reading, given to two places as
+    // TradingView gives it; a fitted one gets the precision its own ticks
+    // would, as the price does.
+    let decimals = match pane.bounds {
+        Some(_) => 2,
+        None => decimals_for(nice_step(high - low, (row.height / 52.0).max(2.0) as usize)),
+    };
+    label_on_axis(
+        cr,
+        state,
+        &format!("{value:.decimals$}"),
+        plan.plot_x + plan.plot_w,
+        py.round() + 0.5,
+        width,
+        &state.theme.ui.crosshair,
+    );
 }
 
 /// A filled chip on the price axis.
@@ -2937,6 +3020,36 @@ mod tests {
         let crosshair = frame(w, h, |cr| draw_pointer(cr, w, h, &state));
         // Two lines across a 600x400 chart, and the chips at the ends of them.
         assert!(painted(&crosshair) > 500, "the crosshair drew {} pixels", painted(&crosshair));
+    }
+
+    /// An oscillator strip is read off its own axis the way the price is, so
+    /// pointing into one puts a chip on the axis beside it. Volume is a strip
+    /// with no scale written on it, and is left as it was.
+    #[test]
+    fn pointing_into_an_oscillator_strip_reads_its_value_on_the_axis() {
+        let (w, h) = (600.0, 400.0);
+        let mut state = charted(300);
+        let indicator = Indicator::new(2, indicators::Kind::Stochastic);
+        state.indicators.push(Drawn {
+            color: "#5588ff".to_string(),
+            output: indicators::compute(&indicator, &state.bars, 0, state.timeframe, None),
+            indicator,
+        });
+        let plan = layout(&state, w, h);
+        let axis = |pixels: &[u8], y: f64| {
+            let (from, to) = ((plan.plot_x + plan.plot_w) as usize + 4, w as usize);
+            (from..to).filter(|x| pixels[(y as usize * w as usize + x) * 4 + 3] != 0).count()
+        };
+
+        for (id, read) in [(2, true), (1, false)] {
+            let Some(row) = plan.rows.iter().find(|row| row.pane == Some(id)) else {
+                panic!("no strip for {id}");
+            };
+            let y = row.top + row.height * 0.4;
+            state.pointer = Some((300.0, y));
+            let pixels = frame(w, h, |cr| draw_pointer(cr, w, h, &state));
+            assert_eq!(axis(&pixels, y) > 0, read, "strip {id}");
+        }
     }
 
     /// The two layers have to be exactly the same size and in exactly the same

@@ -790,6 +790,29 @@ fn appearance_group(
     }) {
         group.add(&row);
     }
+
+    // %D follows the theme the way a point of control does: unset is the next
+    // colour along from %K's, so the two lines never come out the same.
+    if let Params::Stochastic { d_color, .. } = &indicator.params {
+        let shown = d_color
+            .as_ref()
+            .map(|choice| choice.resolve(&window.theme()))
+            .unwrap_or_else(|| window.theme().companion(colour));
+        group.add(&colour_row(
+            window,
+            refresh,
+            &Ink::new(String::new),
+            "%D colour",
+            &shown,
+            d_color.clone(),
+            move |indicator, choice| {
+                if let Params::Stochastic { d_color, .. } = &mut indicator.params {
+                    *d_color = choice;
+                }
+            },
+            id,
+        ));
+    }
     Some(group)
 }
 
@@ -1079,6 +1102,49 @@ fn parameters_group(
             ));
             group.add(&pane_height_row(window, refresh, id, *height));
         }
+        Params::Stochastic { period, k_smooth, d_period, height, overbought, oversold, .. } => {
+            group.add(&spin_row(
+                window, refresh, id, "%K length", *period as f64, 1.0, 200.0, 1.0,
+                move |indicator, value| {
+                    if let Params::Stochastic { period, .. } = &mut indicator.params {
+                        *period = value as usize;
+                    }
+                },
+            ));
+            group.add(&spin_row(
+                window, refresh, id, "%K smoothing", *k_smooth as f64, 1.0, 50.0, 1.0,
+                move |indicator, value| {
+                    if let Params::Stochastic { k_smooth, .. } = &mut indicator.params {
+                        *k_smooth = value as usize;
+                    }
+                },
+            ));
+            group.add(&spin_row(
+                window, refresh, id, "%D smoothing", *d_period as f64, 1.0, 50.0, 1.0,
+                move |indicator, value| {
+                    if let Params::Stochastic { d_period, .. } = &mut indicator.params {
+                        *d_period = value as usize;
+                    }
+                },
+            ));
+            group.add(&spin_row(
+                window, refresh, id, "Overbought", *overbought, 50.0, 100.0, 1.0,
+                move |indicator, value| {
+                    if let Params::Stochastic { overbought, .. } = &mut indicator.params {
+                        *overbought = value;
+                    }
+                },
+            ));
+            group.add(&spin_row(
+                window, refresh, id, "Oversold", *oversold, 0.0, 50.0, 1.0,
+                move |indicator, value| {
+                    if let Params::Stochastic { oversold, .. } = &mut indicator.params {
+                        *oversold = value;
+                    }
+                },
+            ));
+            group.add(&pane_height_row(window, refresh, id, *height));
+        }
         Params::Atr { period, height } => {
             group.add(&spin_row(
                 window, refresh, id, "Period", *period as f64, 2.0, 200.0, 1.0,
@@ -1349,7 +1415,8 @@ fn reset_row(
             Params::MovingAverage { .. }
             | Params::Volume { .. }
             | Params::Rsi { .. }
-            | Params::Atr { .. } => {}
+            | Params::Atr { .. }
+            | Params::Stochastic { .. } => {}
         });
         refresh.run();
     });
@@ -1515,7 +1582,8 @@ fn pane_height_row(
         move |indicator, share| match &mut indicator.params {
             Params::Volume { height }
             | Params::Rsi { height, .. }
-            | Params::Atr { height, .. } => *height = share,
+            | Params::Atr { height, .. }
+            | Params::Stochastic { height, .. } => *height = share,
             _ => {}
         },
     )

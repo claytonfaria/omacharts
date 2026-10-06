@@ -114,6 +114,7 @@ Every indicator the app has, with every parameter it exposes:
 | `sma`, `ema` | `--period` |
 | `rsi` | `--period`, `--overbought`, `--oversold`, `--height` |
 | `atr` | `--period`, `--height` |
+| `stochastic` | `--period` (%K length), `--k-smooth`, `--d-period`, `--overbought`, `--oversold`, `--height`, `--d-color` |
 | `volume` | `--height` |
 | `vwap` | `--anchor`, `--bands`, `--band-alpha` |
 | `volume_profile` | `--anchor`, `--rows` (a number or `auto`), `--value-area`, `--poc-color` |
@@ -132,6 +133,7 @@ Colours come in two kinds, and the difference matters:
 omacharts chart indicator add vwap --anchor month --bands 1,2 --band-alpha 0.3
 omacharts chart indicator add volume_profile --rows auto --color Violet --poc-color Amber
 omacharts chart indicator set rsi --period 21 --overbought 80
+omacharts chart indicator add stochastic --period 14 --k-smooth 3 --d-period 3
 ```
 
 `set` reconfigures one already on the chart. If the chart has two of a kind it
