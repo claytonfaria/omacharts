@@ -1588,8 +1588,12 @@ fn describe_indicator(stored: &Value) -> String {
         .find(|k| k.key() == kind)
         .map(|k| k.short_name().to_string())
         .unwrap_or_else(|| kind.to_string());
-    if let Some(period) = stored["params"]["period"].as_u64() {
-        text.push_str(&format!("({period})"));
+    let lengths: Vec<String> = ["period", "k_smooth", "d_period"]
+        .iter()
+        .filter_map(|key| stored["params"][key].as_u64().map(|n| n.to_string()))
+        .collect();
+    if !lengths.is_empty() {
+        text.push_str(&format!("({})", lengths.join(",")));
     }
     if let Some(reset) = stored["params"]["reset"].as_str() {
         text.push_str(&format!(" · {reset}"));
@@ -1600,6 +1604,9 @@ fn describe_indicator(stored: &Value) -> String {
 /// Every parameter a command offered, read and checked before one is written.
 struct Edits {
     period: Option<u64>,
+    k_smooth: Option<u64>,
+    d_period: Option<u64>,
+    d_color: Option<ColorChoice>,
     anchor: Option<Reset>,
     rows: Option<Option<u64>>,
     value_area: Option<f64>,
@@ -1619,6 +1626,9 @@ impl Edits {
     fn read(m: &clap::ArgMatches) -> Result<Edits, Fault> {
         Ok(Edits {
             period: number(m, "period")?.map(|n| n as u64),
+            k_smooth: number(m, "k-smooth")?.map(|n| n as u64),
+            d_period: number(m, "d-period")?.map(|n| n as u64),
+            d_color: colour(m, "d-color")?,
             anchor: match arg(m, "anchor") {
                 None => None,
                 Some(text) => Some(Reset::from_key(text).ok_or_else(|| {
@@ -1672,6 +1682,9 @@ impl Edits {
 
     fn is_empty(&self) -> bool {
         self.period.is_none()
+            && self.k_smooth.is_none()
+            && self.d_period.is_none()
+            && self.d_color.is_none()
             && self.anchor.is_none()
             && self.rows.is_none()
             && self.value_area.is_none()
@@ -1702,6 +1715,24 @@ impl Edits {
             match params.get("period").is_some() {
                 true => params["period"] = json!(period.max(1)),
                 false => return Err(refuse("period")),
+            }
+        }
+        if let Some(bars) = self.k_smooth {
+            match params.get("k_smooth").is_some() {
+                true => params["k_smooth"] = json!(bars.max(1)),
+                false => return Err(refuse("%K smoothing")),
+            }
+        }
+        if let Some(bars) = self.d_period {
+            match params.get("d_period").is_some() {
+                true => params["d_period"] = json!(bars.max(1)),
+                false => return Err(refuse("%D smoothing")),
+            }
+        }
+        if let Some(colour) = &self.d_color {
+            match kind == IndicatorKind::Stochastic {
+                true => params["d_color"] = to_value(colour)?,
+                false => return Err(refuse("%D line")),
             }
         }
         if let Some(anchor) = self.anchor {
@@ -2920,6 +2951,34 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
         assert_eq!(parsed["indicators"][0]["params"]["period"], 21);
         assert_eq!(parsed["indicators"][0]["params"]["overbought"], 80.0);
+    }
+
+    #[test]
+    fn a_stochastic_takes_its_smoothings_and_a_d_colour_and_nothing_else_does() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --switch", &store);
+        let out = run("chart indicator add stochastic --book Macro", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        assert!(out.out.contains("Stoch(14,3,3)"), "{}", out.out);
+
+        let out = run(
+            "chart indicator set stochastic --book Macro --period 5 --k-smooth 1 \
+             --d-period 5 --overbought 85 --d-color Amber",
+            &store,
+        );
+        assert_eq!(out.code, 0, "{}", out.err);
+        let listed = run("chart indicator list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        let stoch = &parsed["indicators"][0]["params"];
+        assert_eq!(stoch["period"], 5);
+        assert_eq!(stoch["k_smooth"], 1);
+        assert_eq!(stoch["d_period"], 5);
+        assert_eq!(stoch["overbought"], 85.0);
+        assert_eq!(stoch["d_color"]["name"], "Amber");
+
+        run("chart indicator add rsi --book Macro", &store);
+        let refused = run("chart indicator set rsi --book Macro --d-period 5", &store);
+        assert_ne!(refused.code, 0);
     }
 
     #[test]

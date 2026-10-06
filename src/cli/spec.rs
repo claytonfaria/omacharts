@@ -115,7 +115,7 @@ pub const CHART_SELECTOR: &str =
 const STYLES: &[&str] = &["candles", "ohlc"];
 const SESSIONS: &[&str] = &["regular", "extended"];
 const SPLITS: &[&str] = &["horizontal", "vertical"];
-const KINDS: &[&str] = &["volume", "sma", "ema", "vwap", "volume_profile", "rsi", "atr"];
+const KINDS: &[&str] = &["volume", "sma", "ema", "vwap", "volume_profile", "rsi", "atr", "stochastic"];
 const ANCHORS: &[&str] = &["session", "week", "month", "quarter", "year"];
 const LINE_STYLES: &[&str] = &["solid", "dashed", "dotted"];
 const SWITCHES: &[&str] = &["on", "off"];
@@ -620,18 +620,21 @@ pub const SURFACE: &[Noun] = &[
                     Flag::valued("book", "BOOK", "which chartbook (default: the open one)"),
                     Flag::valued("chart", "CHART", CHART_SELECTOR),
                     Flag::valued("id", "N", "which one, when a chart has two of a kind"),
-                    Flag::valued("period", "N", "bars averaged: SMA, EMA, RSI, ATR"),
+                    Flag::valued("period", "N", "bars averaged: SMA, EMA, RSI, ATR; the stochastic's %K length"),
+                    Flag::valued("k-smooth", "N", "bars the stochastic's %K is smoothed over"),
+                    Flag::valued("d-period", "N", "bars the stochastic's %D averages %K over"),
                     Flag::valued("anchor", "WHEN", "what VWAP and the volume profile reset on")
                         .of(ANCHORS),
                     Flag::valued("rows", "N", "volume profile rows, or `auto` to follow the instrument's own increment"),
                     Flag::valued("value-area", "F", "the share of volume the value area covers, 0-1"),
                     Flag::valued("poc-color", "COLOUR", "the volume profile's point of control"),
+                    Flag::valued("d-color", "COLOUR", "the stochastic's %D line"),
                     Flag::valued("color", "COLOUR", "the line, or the volume profile's background"),
                     Flag::valued("width", "F", "line thickness; 0 draws no line at all"),
                     Flag::valued("style", "STYLE", "how the line is drawn").of(LINE_STYLES),
-                    Flag::valued("height", "F", "share of the chart a pane takes, 0.05-0.95: volume, RSI, ATR"),
-                    Flag::valued("overbought", "F", "the RSI level drawn across the top"),
-                    Flag::valued("oversold", "F", "the RSI level drawn across the bottom"),
+                    Flag::valued("height", "F", "share of the chart a pane takes, 0.05-0.95: volume, RSI, ATR, stochastic"),
+                    Flag::valued("overbought", "F", "the RSI or stochastic level drawn across the top"),
+                    Flag::valued("oversold", "F", "the RSI or stochastic level drawn across the bottom"),
                     Flag::valued("bands", "LIST", "which VWAP bands are drawn: 1,2,3 or none"),
                     Flag::valued("band-alpha", "F", "how solid the VWAP shading is, 0.02-0.6"),
                     Flag::valued("visible", "BOOL", "draw it at all").of(SWITCHES),
