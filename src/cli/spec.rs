@@ -31,6 +31,10 @@ impl Arg {
     const fn many(name: &'static str, help: &'static str) -> Arg {
         Arg { name, help, required: true, many: true, values: &[] }
     }
+    /// Takes the rest of the line, or nothing at all.
+    const fn any(name: &'static str, help: &'static str) -> Arg {
+        Arg { name, help, required: false, many: true, values: &[] }
+    }
     const fn of(mut self, values: &'static [&'static str]) -> Arg {
         self.values = values;
         self
@@ -316,6 +320,29 @@ pub const SURFACE: &[Noun] = &[
                 ],
                 flags: &[],
                 example: "omacharts watchlist link Semis 3",
+                json: true,
+                writes: true,
+                workspace: false,
+            },
+            Verb {
+                name: "export",
+                about: "Write watchlists out as a file another machine can import",
+                args: &[Arg::any("LIST", "only these watchlists (default: every one)")],
+                flags: &[],
+                example: "omacharts watchlist export",
+                json: false,
+                writes: false,
+                workspace: false,
+            },
+            Verb {
+                name: "import",
+                about: "Bring in watchlists exported elsewhere, adding what is missing",
+                args: &[Arg::req("FILE", "a file from `watchlist export`, or `-` for stdin")],
+                flags: &[Flag::switch(
+                    "replace",
+                    "make each imported watchlist exactly as exported, instead of adding to it",
+                )],
+                example: "omacharts watchlist import watchlists.json",
                 json: true,
                 writes: true,
                 workspace: false,

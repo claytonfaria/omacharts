@@ -25,7 +25,9 @@ Fast, beautiful charting software for [Omarchy](https://omarchy.org).
   keeps its own symbol, resolution, indicators and settings. Keep as many
   arrangements as you want as chartbooks, each with its own watchlist, and
   switch between them from the strip along the bottom. Link charts and
-  watchlists as you need to. It all comes back the way you left it.
+  watchlists as you need to. It all comes back the way you left it, and
+  `omacharts watchlist export` and `import` carry your watchlists to your
+  other machines.
 - **Keyboard first.** An intuitive, discoverable user interface, prepared for
   power users. Hotkeys for the whole app: split and close charts, resize them,
   walk the chartbooks, step the resolution, rotate the watchlists. Type a
