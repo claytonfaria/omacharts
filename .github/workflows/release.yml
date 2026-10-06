@@ -88,33 +88,54 @@ jobs:
   # attached to the release. After `sync`, so it uses the PKGBUILD carrying
   # this tag's version and digest — which also means a release that gets this
   # far has proved the PKGBUILD works against the tarball GitHub serves.
+  #
+  # Once per architecture, each on a runner of its own kind. Arch Linux itself
+  # is x86_64 only; aarch64 machines — an Omarchy Mac among them — run Arch
+  # Linux ARM, which publishes no container image, so its root filesystem is
+  # imported from the project's own tarball instead.
   package:
     needs: sync
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
-    container:
-      image: archlinux:base-devel
     steps:
-      - name: Dependencies
-        run: |
-          pacman -Syu --noconfirm git rust gtk4 libadwaita github-cli
-          # The container is root and the checkout is not, so git refuses the
-          # directory — and `gh release upload` shells out to git to work out
-          # which repository it is in.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v4
         with:
           ref: main
+      - name: An Arch system to build in
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.arch }}" = x86_64 ]; then
+            echo image=archlinux:base-devel >> "$GITHUB_ENV"
+          else
+            curl -fsSL http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz |
+              docker import - archlinuxarm
+            echo image=archlinuxarm >> "$GITHUB_ENV"
+          fi
       - name: Build the package
         run: |
           set -euo pipefail
-          # makepkg refuses to run as root, which is all a container has.
-          useradd -m builder
-          cp packaging/aur/PKGBUILD /home/builder/
-          chown -R builder:builder /home/builder
-          su builder -c 'cd ~ && makepkg --noconfirm'
-          mv /home/builder/omacharts-*-x86_64.pkg.tar.zst . 2>/dev/null || true
+          docker run --rm -v "$PWD:/w" -w /w "$image" bash -euo pipefail -c '
+            # A fresh root filesystem has no keys to check packages against,
+            # and pacman cannot drop to its download user inside a container.
+            pacman-key --init
+            pacman-key --populate
+            sed -i "s/^DownloadUser/#DownloadUser/" /etc/pacman.conf
+            pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita
+            # makepkg refuses to run as root, which is all a container has.
+            useradd -m builder
+            cp packaging/aur/PKGBUILD /home/builder/
+            chown -R builder:builder /home/builder
+            # Arch Linux ARM defaults to .pkg.tar.xz; one name for every arch.
+            su builder -c "cd ~ && PKGEXT=.pkg.tar.zst makepkg --noconfirm"
+            cp /home/builder/omacharts-*.pkg.tar.zst /w/'
           ls -l omacharts-*.pkg.tar.zst
       - name: Attach it to the release
         env:
@@ -123,4 +144,4 @@ jobs:
           set -euo pipefail
           # The debug package is a by-product nobody installs.
           gh release upload "$GITHUB_REF_NAME" \
-            $(ls omacharts-*-x86_64.pkg.tar.zst | grep -v -- '-debug-') --clobber
+            $(ls omacharts-*-${{ matrix.arch }}.pkg.tar.zst | grep -v -- '-debug-') --clobber
