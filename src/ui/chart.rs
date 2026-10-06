@@ -1435,7 +1435,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
                 draw_pane_name(cr, state, drawn, plot_x, row.top);
             }
             Output::Pane(pane) => {
-                draw_pane(cr, state, pane, drawn, &columns, plot_w, row.top, row.height)
+                draw_pane(cr, state, pane, drawn, &columns, plot_w, row.top, row.height, width)
             }
             _ => {}
         }
@@ -1861,6 +1861,43 @@ fn draw_pane_name(cr: &cairo::Context, state: &State, drawn: &Drawn, plot_x: f64
     let _ = cr.show_text(&drawn.indicator.label_for(state.timeframe));
 }
 
+/// Room at the top of a strip for its name, so a line at the top of its scale
+/// runs under the name rather than through it.
+const PANE_NAME_ROOM: f64 = 16.0;
+
+/// The part of a strip its scale is laid over, as a top and a height: under
+/// the name, and a few pixels clear of the strip below.
+///
+/// The drawing and the crosshair both read the strip through this, or the
+/// value on the axis would not be the line under the pointer.
+fn pane_plot(top: f64, height: f64) -> (f64, f64) {
+    let room = PANE_NAME_ROOM.min(height * 0.3);
+    let foot = 3.0_f64.min(height * 0.1);
+    (top + room, (height - room - foot).max(1.0))
+}
+
+/// How many places a strip's values are written to. A fixed scale gets two,
+/// as TradingView gives an oscillator; a fitted one gets the precision its own
+/// ticks would, as the price does.
+fn pane_decimals(pane: &omacharts_engine::indicators::Pane, low: f64, high: f64, height: f64) -> usize {
+    match pane.bounds {
+        Some(_) => 2,
+        None => decimals_for(nice_step(high - low, (height / 52.0).max(2.0) as usize)),
+    }
+}
+
+/// The colour of a strip's second line: a stochastic's %D. Its own if somebody
+/// chose one, otherwise the theme's companion to the main line, as a point of
+/// control is.
+fn signal_colour(state: &State, drawn: &Drawn) -> String {
+    match &drawn.indicator.params {
+        omacharts_engine::Params::Stochastic { d_color: Some(choice), .. } => {
+            choice.resolve(&state.theme)
+        }
+        _ => state.theme.companion(&drawn.color),
+    }
+}
+
 /// One indicator in its own strip: guides, then the line.
 ///
 /// The strip carries its own name because the legend at the top cannot say
@@ -1876,12 +1913,14 @@ fn draw_pane(
     plot_w: f64,
     top: f64,
     height: f64,
+    width: f64,
 ) {
     let plot_x = columns.plot_x;
     let (first, visible) = (columns.first, columns.visible);
     let values = &pane.values[first.min(pane.values.len())..(first + visible).min(pane.values.len())];
     let Some((low, high)) = pane_range(pane, first, visible) else { return };
-    let to_y = |value: f64| top + height * (high - value) / (high - low);
+    let (inner_top, inner_h) = pane_plot(top, height);
+    let to_y = |value: f64| inner_top + inner_h * (high - value) / (high - low);
 
     // The band between the guides, so overbought and oversold read as regions
     // rather than two lines you have to remember the meaning of.
@@ -1932,17 +1971,25 @@ fn draw_pane(
     }
     let strip = |value: f64| to_y(value).clamp(top, top + height);
     stroke_pane_line(cr, stroke, &drawn.color, values, columns, &strip);
-    if let Some(signal) = &pane.signal {
-        // A stochastic's %D: its own colour if somebody chose one, otherwise
-        // the theme's companion to the main line, as a point of control is.
-        let colour = match &drawn.indicator.params {
-            omacharts_engine::Params::Stochastic { d_color: Some(choice), .. } => {
-                choice.resolve(&state.theme)
-            }
-            _ => state.theme.companion(&drawn.color),
-        };
+    let signal = pane.signal.as_ref().map(|signal| (signal, signal_colour(state, drawn)));
+    if let Some((signal, colour)) = &signal {
         let signal = &signal[first.min(signal.len())..(first + visible).min(signal.len())];
-        stroke_pane_line(cr, stroke, &colour, signal, columns, &strip);
+        stroke_pane_line(cr, stroke, colour, signal, columns, &strip);
+    }
+
+    // Each line's latest value on the axis, in the line's own colour, as the
+    // last price is. The main line's last, so it is the one on top when the
+    // two meet.
+    let decimals = pane_decimals(pane, low, high, height);
+    let lines = signal.iter().map(|(series, colour)| (*series, colour.as_str()));
+    for (series, colour) in lines.chain([(&pane.values, drawn.color.as_str())]) {
+        let Some(last) = series.iter().rev().find_map(|value| *value) else { continue };
+        let y = to_y(last);
+        if y < top || y > top + height {
+            continue;
+        }
+        let text = format!("{last:.decimals$}");
+        label_on_axis(cr, state, &text, plot_x + plot_w, y.round() + 0.5, width, colour);
     }
 }
 
@@ -2161,14 +2208,9 @@ fn draw_pane_value(
         return;
     };
     let Some((low, high)) = pane_range(pane, first, visible) else { return };
-    let value = high - (py - row.top) / row.height * (high - low);
-    // A fixed scale is a percentage-like reading, given to two places as
-    // TradingView gives it; a fitted one gets the precision its own ticks
-    // would, as the price does.
-    let decimals = match pane.bounds {
-        Some(_) => 2,
-        None => decimals_for(nice_step(high - low, (row.height / 52.0).max(2.0) as usize)),
-    };
+    let (inner_top, inner_h) = pane_plot(row.top, row.height);
+    let value = high - (py - inner_top) / inner_h * (high - low);
+    let decimals = pane_decimals(pane, low, high, row.height);
     label_on_axis(
         cr,
         state,
@@ -3020,6 +3062,19 @@ mod tests {
         let crosshair = frame(w, h, |cr| draw_pointer(cr, w, h, &state));
         // Two lines across a 600x400 chart, and the chips at the ends of them.
         assert!(painted(&crosshair) > 500, "the crosshair drew {} pixels", painted(&crosshair));
+    }
+
+    /// A strip's name is written in its top 13 pixels or so; the top of its
+    /// scale has to sit under that, or a line at its high runs through it.
+    #[test]
+    fn the_top_of_a_strips_scale_sits_under_its_name() {
+        let (top, height) = (300.0, 80.0);
+        let (inner_top, inner_h) = pane_plot(top, height);
+        assert!(inner_top >= top + 14.0, "{inner_top}");
+        assert!(inner_top + inner_h <= top + height, "{inner_top} + {inner_h}");
+        // A strip dragged down to a sliver still has a scale to draw on.
+        let (_, sliver) = pane_plot(top, 12.0);
+        assert!(sliver > 0.0);
     }
 
     /// An oscillator strip is read off its own axis the way the price is, so
