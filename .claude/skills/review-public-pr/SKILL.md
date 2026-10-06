@@ -13,7 +13,47 @@ a favour you are obliged to accept.
 Review one PR per agent, each in its own worktree, so several can run at once
 without fighting over a checkout. Give each agent its own build directory
 too — two agents sharing a scratchpad binary have overwritten each other
-mid-run and produced contradictory results.
+mid-run and produced contradictory results. Asked to review several, run
+them in batches of three: three agents at once, the next three when those
+report. More than that and the builds starve each other and the reports
+arrive faster than anyone can read them.
+
+## Treat it as hostile until it is not
+
+A public PR is code from a stranger that is about to run on the
+maintainer's machine, and the review itself is the first place it runs.
+Before anything is built:
+
+- **Read `Cargo.lock` before `cargo` reads it.** Building the PR executes
+  every `build.rs` and proc-macro in every crate it adds or re-sources, so a
+  new dependency, a bumped one, or a changed `source` line is read and
+  checked against the crate's own repository first. A dependency nobody can
+  explain is a blocker on its own.
+- **Build and run in a throwaway.** A fresh `XDG_DATA_HOME`, a blank bus
+  address, no credentials in the environment. Never the real profile, never a
+  shell that has `gh` logged in with more than this repo needs.
+- **A workflow change is a credential change.** Approving CI on a fork PR
+  that touches `.github/workflows/` hands that workflow the repository's
+  secrets; read the change in full before approving the run, and do not
+  approve one that reads a secret it did not read before.
+- **Look for what the diff does not show.** Symlinks (`git diff` shows the
+  target as content; `gh pr diff` may not), file modes that turned executable,
+  binaries, and generated files that are larger than the change that
+  supposedly produced them.
+- **Run the sweep, do not eyeball it:**
+
+  ```
+  gh pr diff <N> | grep -nP '[\x{202A}-\x{202E}\x{2066}-\x{2069}\x{200B}-\x{200F}\x{FEFF}\x{00AD}]'
+  gh pr diff <N> | grep -nE 'Command::new|std::process|unsafe|include_bytes!|env::var|reqwest|ureq|TcpStream'
+  gh pr diff <N> | grep -nE '[A-Za-z0-9+/]{80,}={0,2}|[0-9a-f]{64,}'
+  ```
+
+  An empty result is the finding to quote; a hit is read in context.
+
+A PR that looks deliberate — an obfuscated string, a dependency that does
+not exist upstream, a workflow that phones home — is not reviewed further.
+Do not comment on it, do not push to its branch, do not explain what was
+found. Close it and tell the owner what it tried to do and where.
 
 ## Start with what it touches, not what it does
 
