@@ -4207,9 +4207,11 @@ impl Window {
         let popover = gtk::Popover::new();
         popover.set_child(Some(&content));
         // Or, on a chart too narrow to show the strip, to the resolution
-        // beside the symbol that stands in for it.
+        // beside the symbol that stands in for it. Mapped rather than
+        // visible: the strip is hidden by its row stepping aside, and only
+        // the map state reaches down through the row to the strip itself.
         let pane = self.focused_pane();
-        match pane.strip.is_child_visible() {
+        match pane.strip.is_mapped() {
             true => popover.set_parent(&pane.strip),
             false => popover.set_parent(&pane.timeframe_menu),
         }
