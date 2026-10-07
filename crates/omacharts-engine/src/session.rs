@@ -12,7 +12,10 @@
 //! Instruments that keep hours this module does not know, or no hours at all,
 //! are left alone, because filtering them would only throw data away.
 
-use chrono::{Datelike, TimeZone, Timelike, Weekday};
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+use chrono::{Datelike, NaiveDate, TimeZone, Timelike, Weekday};
 use chrono_tz::America::New_York;
 use chrono_tz::Asia::Taipei;
 use chrono_tz::Tz;
@@ -65,26 +68,115 @@ struct Market {
     /// Minutes past local midnight, open inclusive and close exclusive.
     regular: (u32, u32),
     trading: (u32, u32),
+    /// Whether the bar stamped at the closing bell is the close itself, which
+    /// `regular` then runs a minute past the bell to keep.
+    close_prints: bool,
+    /// The exchange's own list of the days it shuts, or shuts early.
+    calendar: fn() -> &'static Calendar,
+}
+
+/// One trading day's windows, once the calendar has had its say.
+struct Day {
+    regular: (u32, u32),
+    trading: (u32, u32),
+    /// The opening and closing bell: `regular`, less the minute it keeps for
+    /// the closing print.
+    bell: (u32, u32),
 }
 
 impl Market {
-    /// Minutes past midnight and the weekday, where this market keeps them.
+    /// The local date and minutes past midnight, where this market keeps them.
     ///
     /// Timezone-aware rather than a fixed offset, because a session keeps its
     /// local hours across daylight saving while its UTC offset moves.
-    fn local(&self, ts: i64) -> Option<(Weekday, u32)> {
+    fn local(&self, ts: i64) -> Option<(NaiveDate, u32)> {
         let local = self.zone.timestamp_opt(ts, 0).single()?;
-        Some((local.weekday(), local.hour() * 60 + local.minute()))
+        Some((local.date_naive(), local.hour() * 60 + local.minute()))
     }
 
-    /// Is `ts` a weekday inside one of this market's windows?
-    fn open(&self, (start, end): (u32, u32), ts: i64) -> bool {
-        self.local(ts).is_some_and(|(day, minutes)| weekday(day) && (start..end).contains(&minutes))
+    /// How `date` trades, or `None` for a weekend or a holiday.
+    ///
+    /// An early close moves the bell and nothing else. The post-market after
+    /// one ends earlier too, but how much earlier varies by venue, and keeping
+    /// the usual end is the generous side of the trade [`is_trading`] makes.
+    fn day(&self, date: NaiveDate) -> Option<Day> {
+        let calendar = (self.calendar)();
+        if !weekday(date.weekday()) || calendar.closed.contains(&date) {
+            return None;
+        }
+        let print = u32::from(self.close_prints);
+        let close = calendar.early.get(&date).map_or(self.regular.1, |bell| bell + print);
+        Some(Day {
+            regular: (self.regular.0, close),
+            trading: self.trading,
+            bell: (self.regular.0, close - print),
+        })
+    }
+
+    /// Is `ts` on a trading day, inside the window `pick` chooses from it?
+    fn open(&self, ts: i64, pick: fn(&Day) -> (u32, u32)) -> bool {
+        self.local(ts).is_some_and(|(date, minutes)| {
+            self.day(date).is_some_and(|day| {
+                let (start, end) = pick(&day);
+                (start..end).contains(&minutes)
+            })
+        })
     }
 }
 
 fn weekday(day: Weekday) -> bool {
     !matches!(day, Weekday::Sat | Weekday::Sun)
+}
+
+/// The days an exchange has said it will not trade, and the days it closes
+/// early with the time of that day's closing bell.
+///
+/// Read from a file the exchange's own list was copied into, once per run. A
+/// year nobody has written down has nothing in it, which is where this was
+/// before there were files: every weekday reads as an ordinary trading day.
+struct Calendar {
+    closed: HashSet<NaiveDate>,
+    early: HashMap<NaiveDate, u32>,
+}
+
+impl Calendar {
+    /// One date per line, `#` for comments; `@HH:MM` after the date makes it
+    /// an early close at that time rather than a day off.
+    fn parse(text: &str) -> Calendar {
+        let mut calendar = Calendar { closed: HashSet::new(), early: HashMap::new() };
+        for line in text.lines().filter(|line| !line.starts_with('#')) {
+            let mut words = line.split_whitespace();
+            let Some(date) = words.next().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+            else {
+                continue;
+            };
+            let early = words
+                .next()
+                .and_then(|w| w.strip_prefix('@'))
+                .and_then(|t| chrono::NaiveTime::parse_from_str(t, "%H:%M").ok());
+            match early {
+                Some(bell) => {
+                    calendar.early.insert(date, bell.hour() * 60 + bell.minute());
+                }
+                None => {
+                    calendar.closed.insert(date);
+                }
+            }
+        }
+        calendar
+    }
+}
+
+fn new_york_calendar() -> &'static Calendar {
+    static CALENDAR: OnceLock<Calendar> = OnceLock::new();
+    CALENDAR.get_or_init(|| Calendar::parse(include_str!("holidays_ny.txt")))
+}
+
+/// The TWSE publishes its Holiday Schedule a year at a time, and
+/// `tools/build_taiwan_holidays.py` merges each year into the file.
+fn taipei_calendar() -> &'static Calendar {
+    static CALENDAR: OnceLock<Calendar> = OnceLock::new();
+    CALENDAR.get_or_init(|| Calendar::parse(include_str!("holidays_tw.txt")))
 }
 
 /// The US cash market. The bar stamped at 16:00 belongs to the post-market,
@@ -93,6 +185,8 @@ const NEW_YORK: Market = Market {
     zone: New_York,
     regular: (9 * 60 + 30, 16 * 60),
     trading: (4 * 60, 20 * 60),
+    close_prints: false,
+    calendar: new_york_calendar,
 };
 
 /// The Taiwan Stock Exchange and the Taipei Exchange, which keep one clock.
@@ -107,6 +201,8 @@ const TAIPEI: Market = Market {
     zone: Taipei,
     regular: (9 * 60, 13 * 60 + 31),
     trading: (8 * 60 + 30, 14 * 60 + 30),
+    close_prints: true,
+    calendar: taipei_calendar,
 };
 
 /// Minutes past midnight, New York time, of the hour the futures session
@@ -156,7 +252,7 @@ pub fn filter(bars: &[Bar], session: Session, instrument: &Instrument, intraday:
     let Some(market) = market(instrument) else {
         return bars.to_vec();
     };
-    bars.iter().copied().filter(|bar| market.open(market.regular, bar.ts)).collect()
+    bars.iter().copied().filter(|bar| market.open(bar.ts, |day| day.regular)).collect()
 }
 
 /// Could another bar still arrive for this instrument at `ts`?
@@ -169,9 +265,10 @@ pub fn filter(bars: &[Bar], session: Session, instrument: &Instrument, intraday:
 /// Generous at every edge on purpose. Being wrong in this direction costs one
 /// request that comes back with nothing; being wrong in the other leaves a
 /// chart quietly stale while the thing it charts is moving, which is the only
-/// failure here anybody would notice. There is no holiday calendar, so a
-/// public holiday reads as an ordinary weekday and costs a handful of empty
-/// replies — the same trade, taken knowingly.
+/// failure here anybody would notice. The exchanges' holiday calendars stop
+/// a holiday from being asked about, for the years they have been written
+/// down; past those a holiday reads as an ordinary weekday and costs a
+/// handful of empty replies — the same trade, taken knowingly.
 pub fn is_trading(instrument: &Instrument, ts: i64) -> bool {
     // Two very different groups come out the same way here. FX and crypto
     // never close, so another bar is always coming. A foreign listing, or an
@@ -182,9 +279,11 @@ pub fn is_trading(instrument: &Instrument, ts: i64) -> bool {
         return true;
     };
     if instrument.kind == InstrumentKind::FutureRoot {
-        return NEW_YORK.local(ts).is_some_and(|(day, minutes)| futures_are_trading(day, minutes));
+        return NEW_YORK
+            .local(ts)
+            .is_some_and(|(date, minutes)| futures_are_trading(date.weekday(), minutes));
     }
-    market.open(market.trading, ts)
+    market.open(ts, |day| day.trading)
 }
 
 /// The futures week: Sunday evening through to Friday afternoon, broken for an
@@ -196,11 +295,253 @@ pub fn is_trading(instrument: &Instrument, ts: i64) -> bool {
 /// would switch refreshing off for the half of its week that people watch it
 /// for.
 fn futures_are_trading(weekday: Weekday, minutes: u32) -> bool {
+    in_week(weekday, minutes, BREAK_END) && !(BREAK_START..BREAK_END).contains(&minutes)
+}
+
+/// Inside a week that opens on Sunday at `sunday_open` and closes on Friday
+/// at the futures' break, New York time — the futures week, and the FX week,
+/// which opens an hour earlier and does not stop each day.
+fn in_week(weekday: Weekday, minutes: u32, sunday_open: u32) -> bool {
     match weekday {
         Weekday::Sat => false,
-        Weekday::Sun => minutes >= BREAK_END,
+        Weekday::Sun => minutes >= sunday_open,
         Weekday::Fri => minutes < BREAK_START,
-        _ => !(BREAK_START..BREAK_END).contains(&minutes),
+        _ => true,
+    }
+}
+
+/// Where a market is in its day, the way the dot beside a chart's symbol
+/// says it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Phase {
+    Open,
+    PreMarket,
+    PostMarket,
+    Closed,
+}
+
+impl Phase {
+    /// As a heading: "Market open".
+    pub fn label(self) -> &'static str {
+        match self {
+            Phase::Open => "Market open",
+            Phase::PreMarket => "Pre-market",
+            Phase::PostMarket => "Post-market",
+            Phase::Closed => "Market closed",
+        }
+    }
+
+    /// As a word in a sentence that has already said "market": "open".
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Open => "open",
+            Phase::PreMarket => "pre-market",
+            Phase::PostMarket => "post-market",
+            Phase::Closed => "closed",
+        }
+    }
+
+    /// For a machine, and for a style class.
+    pub fn key(self) -> &'static str {
+        match self {
+            Phase::Open => "open",
+            Phase::PreMarket => "pre",
+            Phase::PostMarket => "post",
+            Phase::Closed => "closed",
+        }
+    }
+}
+
+/// An instrument's market right now, and when that next changes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MarketStatus {
+    pub phase: Phase,
+    /// What comes next and when, or `None` for something that never closes.
+    pub next: Option<(Phase, i64)>,
+    /// The clock the market keeps, which is the one its times are told in.
+    pub zone: Tz,
+}
+
+/// How an instrument's week is laid out, for the status rather than for
+/// filtering bars.
+///
+/// Wider than [`market`] on purpose. Filtering has to leave FX and crypto
+/// alone because neither has a cash session to keep; a status has something
+/// true to say about both — FX shuts for the weekend, crypto never does.
+#[derive(Clone, Copy)]
+enum Hours {
+    /// Shares and funds: a pre-market, the bell, a post-market.
+    Cash(&'static Market),
+    /// An index is computed from the cash session and nothing else, so it is
+    /// open between the bells and closed either side of them.
+    Bells(&'static Market),
+    Futures,
+    Fx,
+    Always,
+}
+
+impl Hours {
+    fn of(instrument: &Instrument) -> Option<Hours> {
+        Some(match instrument.kind {
+            InstrumentKind::Crypto => Hours::Always,
+            InstrumentKind::Fx => Hours::Fx,
+            InstrumentKind::FutureRoot => market(instrument).map(|_| Hours::Futures)?,
+            InstrumentKind::Index => Hours::Bells(market(instrument)?),
+            InstrumentKind::Equity | InstrumentKind::Etf => Hours::Cash(market(instrument)?),
+        })
+    }
+
+    fn zone(self) -> Tz {
+        match self {
+            Hours::Cash(market) | Hours::Bells(market) => market.zone,
+            Hours::Futures | Hours::Fx => New_York,
+            Hours::Always => chrono_tz::UTC,
+        }
+    }
+
+    fn phase(self, ts: i64) -> Phase {
+        let open = |yes: bool| if yes { Phase::Open } else { Phase::Closed };
+        let new_york = || NEW_YORK.local(ts).map(|(date, minutes)| (date.weekday(), minutes));
+        match self {
+            Hours::Always => Phase::Open,
+            Hours::Futures => open(new_york().is_some_and(|(day, m)| futures_are_trading(day, m))),
+            // Sydney's Monday morning to New York's Friday close.
+            Hours::Fx => open(new_york().is_some_and(|(day, m)| in_week(day, m, BREAK_START))),
+            Hours::Bells(market) => open(Hours::Cash(market).phase(ts) == Phase::Open),
+            Hours::Cash(market) => {
+                let Some((minutes, day)) =
+                    market.local(ts).and_then(|(date, m)| Some((m, market.day(date)?)))
+                else {
+                    return Phase::Closed;
+                };
+                let ((pre, close), (bell, last)) = (day.trading, day.bell);
+                match minutes {
+                    m if (bell..last).contains(&m) => Phase::Open,
+                    m if (pre..bell).contains(&m) => Phase::PreMarket,
+                    m if (last..close).contains(&m) => Phase::PostMarket,
+                    _ => Phase::Closed,
+                }
+            }
+        }
+    }
+
+    /// Every local time on `date` at which the phase can change, earliest
+    /// first. Asked a day at a time because an early close moves one.
+    ///
+    /// Midnight is never one: every market here is already closed when its
+    /// weekday turns over into a weekend, a holiday, or out of one.
+    fn edges(self, date: NaiveDate) -> Vec<u32> {
+        match self {
+            Hours::Always => Vec::new(),
+            Hours::Futures => vec![BREAK_START, BREAK_END],
+            Hours::Fx => vec![BREAK_START],
+            Hours::Cash(market) | Hours::Bells(market) => market
+                .day(date)
+                .map(|day| vec![day.trading.0, day.bell.0, day.bell.1, day.trading.1])
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The first edge after `now` at which the phase differs from the one
+    /// it has now.
+    ///
+    /// Walked edge by edge rather than minute by minute. Three weeks is the
+    /// horizon because Lunar New Year shuts Taipei for over a week, and a
+    /// weekend either side of it makes eleven days.
+    fn next(self, now: i64) -> Option<(Phase, i64)> {
+        let zone = self.zone();
+        let current = self.phase(now);
+        let today = zone.timestamp_opt(now, 0).single()?.date_naive();
+        (0..21)
+            .filter_map(|days| today.checked_add_days(chrono::Days::new(days)))
+            .flat_map(|day| {
+                let edges = self.edges(day);
+                edges.into_iter().filter_map(move |m| day.and_hms_opt(m / 60, m % 60, 0))
+            })
+            // `earliest` because a fall-back hour happens twice, and an edge
+            // in a spring-forward gap does not happen at all, which is what
+            // dropping it says.
+            .filter_map(|local| zone.from_local_datetime(&local).earliest())
+            .map(|at| at.timestamp())
+            .filter(|at| *at > now)
+            .map(|at| (self.phase(at), at))
+            .find(|(phase, _)| *phase != current)
+    }
+}
+
+/// Where this instrument's market is at `now`, or `None` for a listing whose
+/// hours this module does not know.
+///
+/// Holidays and early closes are the exchanges' own, for the years their
+/// calendars have been written down; futures and FX keep no holidays here.
+pub fn status(instrument: &Instrument, now: i64) -> Option<MarketStatus> {
+    let hours = Hours::of(instrument)?;
+    Some(MarketStatus { phase: hours.phase(now), next: hours.next(now), zone: hours.zone() })
+}
+
+/// Every exchange whose day this module knows, and where that day is at
+/// `now` — what the clock's tooltip lists.
+pub fn exchanges(now: i64) -> Vec<(Tz, Phase)> {
+    [&NEW_YORK, &TAIPEI]
+        .into_iter()
+        .map(|market| (market.zone, Hours::Cash(market).phase(now)))
+        .collect()
+}
+
+impl MarketStatus {
+    /// What the next change is, in words: "closes in 2h 26m".
+    ///
+    /// Named for what happens rather than for the phase it lands in, because
+    /// "post-market in 2h" makes the reader work out that the market closes.
+    /// Said beside the phase's own name, so the post-market "closes" rather
+    /// than repeating that it is the post-market which is ending.
+    pub fn countdown(&self, now: i64) -> String {
+        let Some((next, at)) = self.next else {
+            return "trades around the clock".into();
+        };
+        let verb = match (self.phase, next) {
+            (Phase::PreMarket, Phase::Open) | (Phase::Closed, Phase::Open) => "opens",
+            (Phase::Closed, _) => "pre-market starts",
+            _ => "closes",
+        };
+        format!("{verb} in {}", span(at - now))
+    }
+
+    /// The wall-clock time of the next change, where the market keeps it:
+    /// "16:00 New York", with the day when it is not today.
+    pub fn next_local(&self, now: i64) -> Option<String> {
+        let (_, at) = self.next?;
+        let at = self.zone.timestamp_opt(at, 0).single()?;
+        let today = self.zone.timestamp_opt(now, 0).single()?.date_naive();
+        let days = (at.date_naive() - today).num_days();
+        let when = match days {
+            0 => at.format("%H:%M"),
+            1..=6 => at.format("%a %H:%M"),
+            _ => at.format("%a %-d %b %H:%M"),
+        };
+        Some(format!("{when} {}", city(self.zone)))
+    }
+}
+
+/// "America/New_York" as people say it.
+pub fn city(zone: Tz) -> String {
+    zone.name().rsplit('/').next().unwrap_or(zone.name()).replace('_', " ")
+}
+
+/// A stretch of time to the precision anybody waiting on it cares about.
+fn span(seconds: i64) -> String {
+    let minutes = (seconds.max(0) + 59) / 60;
+    match minutes {
+        0 | 1 => "a minute".into(),
+        m if m < 60 => format!("{m}m"),
+        m if m < 24 * 60 => match m % 60 {
+            0 => format!("{}h", m / 60),
+            rest => format!("{}h {rest}m", m / 60),
+        },
+        m => match (m / 60) % 24 {
+            0 => format!("{}d", m / (24 * 60)),
+            hours => format!("{}d {hours}h", m / (24 * 60)),
+        },
     }
 }
 
@@ -212,7 +553,7 @@ mod tests {
 
     /// Is this instant inside the New York cash session on a weekday?
     fn in_regular_hours(ts: i64) -> bool {
-        NEW_YORK.open(NEW_YORK.regular, ts)
+        NEW_YORK.open(ts, |day| day.regular)
     }
 
     fn instrument(kind: InstrumentKind, suffix: Option<&str>) -> Instrument {
@@ -509,6 +850,165 @@ mod tests {
         assert!(!is_trading(&taiex, taipei(5, 22, 0)));
         let tokyo = instrument(InstrumentKind::Equity, Some("T"));
         assert!(is_trading(&tokyo, taipei(5, 22, 0)), "Tokyo is not Taipei, and is not ruled on");
+    }
+
+    fn phase_of(it: &Instrument, ts: i64) -> Phase {
+        status(it, ts).expect("a market this module knows").phase
+    }
+
+    #[test]
+    fn a_share_moves_through_pre_open_post_and_closed() {
+        let stock = instrument(InstrumentKind::Equity, None);
+        assert_eq!(phase_of(&stock, ny(13, 3, 59)), Phase::Closed);
+        assert_eq!(phase_of(&stock, ny(13, 4, 0)), Phase::PreMarket);
+        assert_eq!(phase_of(&stock, ny(13, 9, 30)), Phase::Open);
+        assert_eq!(phase_of(&stock, ny(13, 16, 0)), Phase::PostMarket);
+        assert_eq!(phase_of(&stock, ny(13, 20, 0)), Phase::Closed);
+    }
+
+    #[test]
+    fn the_next_change_is_the_next_bell() {
+        let stock = instrument(InstrumentKind::Equity, None);
+        let now = ny(13, 13, 34);
+        let open = status(&stock, now).unwrap();
+        assert_eq!(open.next, Some((Phase::PostMarket, ny(13, 16, 0))));
+        assert_eq!(open.countdown(now), "closes in 2h 26m");
+        assert_eq!(open.next_local(now).as_deref(), Some("16:00 New York"));
+    }
+
+    #[test]
+    fn a_friday_evening_waits_for_monday_morning() {
+        let stock = instrument(InstrumentKind::Equity, None);
+        let now = ny(15, 21, 0);
+        let closed = status(&stock, now).unwrap();
+        assert_eq!(closed.next, Some((Phase::PreMarket, ny(18, 4, 0))));
+        assert_eq!(closed.countdown(now), "pre-market starts in 2d 7h");
+        assert_eq!(closed.next_local(now).as_deref(), Some("Mon 04:00 New York"));
+    }
+
+    #[test]
+    fn an_index_is_only_open_between_the_bells() {
+        let spx = instrument(InstrumentKind::Index, None);
+        assert_eq!(phase_of(&spx, ny(13, 8, 0)), Phase::Closed);
+        assert_eq!(phase_of(&spx, ny(13, 10, 0)), Phase::Open);
+        let now = ny(13, 8, 0);
+        assert_eq!(status(&spx, now).unwrap().countdown(now), "opens in 1h 30m");
+    }
+
+    #[test]
+    fn futures_and_fx_shut_only_for_the_weekend_and_the_break() {
+        let es = instrument(InstrumentKind::FutureRoot, None);
+        assert_eq!(phase_of(&es, ny(13, 3, 0)), Phase::Open, "overnight");
+        assert_eq!(phase_of(&es, ny(13, 17, 30)), Phase::Closed, "the daily break");
+        assert_eq!(status(&es, ny(13, 17, 30)).unwrap().next, Some((Phase::Open, ny(13, 18, 0))));
+        let fx = instrument(InstrumentKind::Fx, None);
+        assert_eq!(phase_of(&fx, ny(13, 17, 30)), Phase::Open, "FX has no break");
+        assert_eq!(phase_of(&fx, ny(16, 12, 0)), Phase::Closed, "Saturday");
+        assert_eq!(status(&fx, ny(16, 12, 0)).unwrap().next, Some((Phase::Open, ny(17, 17, 0))));
+    }
+
+    #[test]
+    fn crypto_never_closes_and_a_foreign_listing_is_not_guessed_at() {
+        let btc = status(&instrument(InstrumentKind::Crypto, None), ny(16, 3, 0)).unwrap();
+        assert_eq!(btc.phase, Phase::Open);
+        assert_eq!(btc.next, None);
+        assert_eq!(btc.countdown(0), "trades around the clock");
+        assert!(status(&instrument(InstrumentKind::Equity, Some("MC")), ny(13, 12, 0)).is_none());
+    }
+
+    #[test]
+    fn taipei_closes_at_the_bell_not_at_the_auction_window() {
+        let tsmc = instrument(InstrumentKind::Equity, Some("TW"));
+        let at = |h, m| Taipei.with_ymd_and_hms(2024, 3, 13, h, m, 0).single().unwrap().timestamp();
+        assert_eq!(phase_of(&tsmc, at(8, 45)), Phase::PreMarket);
+        assert_eq!(phase_of(&tsmc, at(13, 29)), Phase::Open);
+        assert_eq!(phase_of(&tsmc, at(13, 30)), Phase::PostMarket);
+        assert_eq!(phase_of(&tsmc, at(14, 30)), Phase::Closed);
+    }
+
+    fn taipei_2026(month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        Taipei.with_ymd_and_hms(2026, month, day, hour, minute, 0).single().unwrap().timestamp()
+    }
+
+    #[test]
+    fn a_taipei_holiday_is_closed_all_day_and_not_traded() {
+        // Friday 9 October 2026, the day made up for National Day.
+        let tsmc = instrument(InstrumentKind::Equity, Some("TW"));
+        assert_eq!(phase_of(&tsmc, taipei_2026(10, 9, 10, 0)), Phase::Closed);
+        assert!(!is_trading(&tsmc, taipei_2026(10, 9, 10, 0)), "nothing to fetch on a holiday");
+        assert_eq!(phase_of(&tsmc, taipei_2026(10, 8, 10, 0)), Phase::Open, "the day before trades");
+        let taiex = priced_in(InstrumentKind::Index, "TWD");
+        assert_eq!(phase_of(&taiex, taipei_2026(10, 9, 10, 0)), Phase::Closed);
+    }
+
+    #[test]
+    fn the_countdown_steps_over_a_long_weekend() {
+        let tsmc = instrument(InstrumentKind::Equity, Some("TW"));
+        let thursday = taipei_2026(10, 8, 20, 0);
+        let closed = status(&tsmc, thursday).unwrap();
+        assert_eq!(closed.next, Some((Phase::PreMarket, taipei_2026(10, 12, 8, 30))));
+        assert_eq!(closed.next_local(thursday).as_deref(), Some("Mon 08:30 Taipei"));
+    }
+
+    #[test]
+    fn lunar_new_year_is_still_inside_the_horizon() {
+        // Settlement-only days, the holiday proper and a made-up day: the
+        // market shuts from Thursday 12 February to Monday the 23rd.
+        let tsmc = instrument(InstrumentKind::Equity, Some("TW"));
+        let eve = taipei_2026(2, 11, 15, 0);
+        let closed = status(&tsmc, eve).unwrap();
+        assert_eq!(closed.next, Some((Phase::PreMarket, taipei_2026(2, 23, 8, 30))));
+        assert_eq!(closed.next_local(eve).as_deref(), Some("Mon 23 Feb 08:30 Taipei"));
+    }
+
+    /// A line the parser skips is a holiday that silently is not one.
+    #[test]
+    fn every_line_of_both_calendars_is_read() {
+        for text in [include_str!("holidays_tw.txt"), include_str!("holidays_ny.txt")] {
+            let lines = text.lines().filter(|l| !l.starts_with('#')).count();
+            let calendar = Calendar::parse(text);
+            assert_eq!(calendar.closed.len() + calendar.early.len(), lines);
+        }
+    }
+
+    fn ny_2026(month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        New_York.with_ymd_and_hms(2026, month, day, hour, minute, 0).single().unwrap().timestamp()
+    }
+
+    #[test]
+    fn thanksgiving_is_shut_and_the_day_after_closes_at_one() {
+        let stock = instrument(InstrumentKind::Equity, None);
+        assert_eq!(phase_of(&stock, ny_2026(11, 26, 12, 0)), Phase::Closed, "Thanksgiving");
+        assert!(!is_trading(&stock, ny_2026(11, 26, 12, 0)));
+        assert_eq!(phase_of(&stock, ny_2026(11, 27, 12, 59)), Phase::Open);
+        assert_eq!(phase_of(&stock, ny_2026(11, 27, 13, 0)), Phase::PostMarket, "the early bell");
+        let morning = ny_2026(11, 27, 10, 0);
+        let open = status(&stock, morning).unwrap();
+        assert_eq!(open.next, Some((Phase::PostMarket, ny_2026(11, 27, 13, 0))));
+        assert_eq!(open.countdown(morning), "closes in 3h");
+        // A regular-hours chart keeps the short session's bars and no more.
+        let bars = vec![bar(ny_2026(11, 27, 12, 30)), bar(ny_2026(11, 27, 14, 0))];
+        assert_eq!(filter(&bars, Session::Regular, &stock, true).len(), 1);
+    }
+
+    #[test]
+    fn the_evening_before_a_holiday_waits_for_the_day_after() {
+        // Good Friday 2026: Thursday evening's next session is Monday's.
+        let stock = instrument(InstrumentKind::Equity, None);
+        let thursday = ny_2026(4, 2, 21, 0);
+        let closed = status(&stock, thursday).unwrap();
+        assert_eq!(closed.next, Some((Phase::PreMarket, ny_2026(4, 6, 4, 0))));
+    }
+
+    #[test]
+    fn a_countdown_across_the_clocks_changing_counts_real_time() {
+        // 10 March 2024 the clocks went forward at 02:00. From Friday's
+        // close to Monday's pre-market is an hour shorter than it looks.
+        let stock = instrument(InstrumentKind::Equity, None);
+        let friday = New_York.with_ymd_and_hms(2024, 3, 8, 20, 0, 0).single().unwrap().timestamp();
+        let monday = New_York.with_ymd_and_hms(2024, 3, 11, 4, 0, 0).single().unwrap().timestamp();
+        assert_eq!(status(&stock, friday).unwrap().next, Some((Phase::PreMarket, monday)));
+        assert_eq!(monday - friday, (2 * 24 + 8 - 1) * 3600);
     }
 
     #[test]

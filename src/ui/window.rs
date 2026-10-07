@@ -1746,6 +1746,7 @@ impl Window {
         this.wire_shortcuts();
         this.wire_responses(receiver);
         this.wire_theme_polling();
+        this.wire_clock();
         this.wire_backfill();
         this.wire_refresh();
         this.wire_live();
@@ -2245,6 +2246,24 @@ impl Window {
             pane.set_maximized(maximized == Some(pane.id));
         }
         self.sync_corner_clearance();
+        self.sync_clock();
+    }
+
+    /// Put the clock on the chart holding the window's bottom right corner,
+    /// and only that one: with four charts a clock in each is the same time
+    /// four times.
+    fn sync_clock(&self) {
+        let rects = self.layout_rects();
+        let right = self.chart_host.width().max(1) as f64;
+        let bottom = self.chart_host.height().max(1) as f64;
+        let corner = self.mounted().leaves().into_iter().find(|id| {
+            rects
+                .get(id)
+                .is_some_and(|(x, y, w, h)| x + w >= right - 0.5 && y + h >= bottom - 0.5)
+        });
+        for pane in self.panes.borrow().iter() {
+            pane.set_shows_clock(Some(pane.id) == corner);
+        }
     }
 
     /// Keep a chart's maximize button out from under the window's own corner.
@@ -4215,6 +4234,28 @@ impl Window {
         if let Err(error) = crate::bar_plugin::install(&home) {
             eprintln!("omacharts: bar widget not installed: {error}");
         }
+    }
+
+    /// Tick the clock, and every chart's market dot with it, on the second.
+    ///
+    /// Rescheduled each time for the next whole second rather than repeating
+    /// every thousand milliseconds: a timer that fires a little late every time
+    /// drifts, and a clock that skips a second now and then is a clock nobody
+    /// trusts. Weak, so a closed window stops it.
+    fn wire_clock(self: &Rc<Self>) {
+        fn schedule(window: std::rc::Weak<Window>) {
+            let now = chrono::Utc::now();
+            let wait = 1000 - u64::from(now.timestamp_subsec_millis()).min(999);
+            glib::timeout_add_local_once(std::time::Duration::from_millis(wait + 2), move || {
+                let Some(this) = window.upgrade() else { return };
+                let now = chrono::Utc::now().timestamp();
+                for pane in this.panes.borrow().iter() {
+                    pane.tick(now);
+                }
+                schedule(window);
+            });
+        }
+        schedule(Rc::downgrade(self));
     }
 
     fn wire_theme_polling(self: &Rc<Self>) {
