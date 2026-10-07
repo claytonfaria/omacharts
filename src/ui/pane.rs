@@ -532,34 +532,129 @@ fn draw_key(
     label: &str,
 ) {
     use crate::ui::colors::{set_source, set_source_alpha};
-    // A little shorter than the box, so it sits on the text's height rather
-    // than towering over it; on the half pixel, so the hairline covers one row
-    // of pixels rather than smearing across two.
-    let key_h = 16.0_f64.min(h);
-    let top = ((h - key_h) / 2.0).floor() + 0.5;
-    rounded(cr, 0.5, top, w - 1.0, key_h - 1.0, 4.0);
-    set_source_alpha(cr, colour, 0.16);
-    let _ = cr.fill_preserve();
-    set_source_alpha(cr, colour, 0.75);
-    cr.set_line_width(1.0);
-    let _ = cr.stroke();
-
     // The interface's own face, so the number matches the symbol and the
     // resolution beside it rather than whatever cairo calls sans.
     let family = area.pango_context().font_description().and_then(|f| f.family());
-    let family = family.as_deref().unwrap_or("sans-serif");
-    cr.select_font_face(family, gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
-    cr.set_font_size(10.5);
-    set_source(cr, colour);
-    // Centred on the key by the digit's ink, not its advance, and not rounded:
-    // a whole logical pixel is two on a doubled screen, which is a visible
-    // lean in a key this small.
-    if let Ok(e) = cr.text_extents(label) {
-        let x = w / 2.0 - e.width() / 2.0 - e.x_bearing();
-        let y = top + (key_h - 1.0) / 2.0 - e.height() / 2.0 - e.y_bearing();
-        cr.move_to(x, y);
-        let _ = cr.show_text(label);
+    let family = family.as_deref().unwrap_or("sans-serif").to_string();
+    let scale = area.scale_factor().max(1);
+    let options = cr.font_options().ok();
+    let Some(ink) = ink_box(&family, scale, options.as_ref(), label) else { return };
+
+    // In device pixels, because that is where centring is won or lost. The
+    // digit's box is measured as drawn rather than predicted from the font's
+    // metrics, which hinting and antialiasing both overrule; and a digit an
+    // odd number of pixels wide cannot sit in the middle of a key an even
+    // number wide, so the key gives up a pixel to match it rather than the
+    // digit being drawn on a half pixel and blurred.
+    let s = f64::from(scale);
+    let mut key_w = (w * s).round() as i32;
+    if (key_w - ink.width) % 2 != 0 {
+        key_w -= 1;
     }
+    // A little shorter than the box, so it sits on the text's height rather
+    // than towering over it. Its height is even in device pixels, as every
+    // digit's is not, for the same reason.
+    let mut key_h = (16.0_f64.min(h) * s).round() as i32;
+    if (key_h - ink.height) % 2 != 0 {
+        key_h -= 1;
+    }
+    let key_top = ((h * s).round() as i32 - key_h) / 2;
+
+    // The hairline half a line in from the key's edge, so it covers whole
+    // pixels rather than smearing across two.
+    let line = 1.0;
+    let (kw, kh) = (f64::from(key_w) / s, f64::from(key_h) / s);
+    let top = f64::from(key_top) / s;
+    rounded(cr, line / 2.0, top + line / 2.0, kw - line, kh - line, 4.0);
+    set_source_alpha(cr, colour, 0.16);
+    let _ = cr.fill_preserve();
+    set_source_alpha(cr, colour, 0.75);
+    cr.set_line_width(line);
+    let _ = cr.stroke();
+
+    set_source(cr, colour);
+    cr.select_font_face(&family, gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
+    cr.set_font_size(KEY_FONT);
+    let left = (key_w - ink.width) / 2 - ink.left;
+    let baseline = key_top + (key_h - ink.height) / 2 - ink.top;
+    cr.move_to(f64::from(left) / s, f64::from(baseline) / s);
+    let _ = cr.show_text(label);
+}
+
+const KEY_FONT: f64 = 10.5;
+
+/// Where a digit's ink falls, in device pixels, relative to where it is drawn
+/// from.
+#[derive(Clone, Copy)]
+struct Ink {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+/// A digit's ink, measured by drawing it once off screen at this scale with
+/// these font options, and remembered: there are nine digits and the answer
+/// only changes with the font and the screen.
+fn ink_box(
+    family: &str,
+    scale: i32,
+    options: Option<&gtk::cairo::FontOptions>,
+    label: &str,
+) -> Option<Ink> {
+    thread_local! {
+        static SEEN: RefCell<HashMap<(String, i32, String), Option<Ink>>> =
+            RefCell::new(HashMap::new());
+    }
+    let key = (family.to_string(), scale, label.to_string());
+    if let Some(ink) = SEEN.with(|seen| seen.borrow().get(&key).copied()) {
+        return ink;
+    }
+    let ink = measure_ink(family, scale, options, label);
+    SEEN.with(|seen| seen.borrow_mut().insert(key, ink));
+    ink
+}
+
+fn measure_ink(
+    family: &str,
+    scale: i32,
+    options: Option<&gtk::cairo::FontOptions>,
+    label: &str,
+) -> Option<Ink> {
+    const SIDE: i32 = 96;
+    const ORIGIN: i32 = 32;
+    let mut surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::A8, SIDE, SIDE).ok()?;
+    {
+        let cr = gtk::cairo::Context::new(&surface).ok()?;
+        if let Some(options) = options {
+            cr.set_font_options(options);
+        }
+        cr.scale(f64::from(scale), f64::from(scale));
+        cr.select_font_face(family, gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
+        cr.set_font_size(KEY_FONT);
+        let origin = f64::from(ORIGIN) / f64::from(scale);
+        cr.move_to(origin, origin);
+        cr.show_text(label).ok()?;
+    }
+    surface.flush();
+    let stride = surface.stride() as usize;
+    let data = surface.data().ok()?;
+    // Half covered or more is ink: the faint fringe of antialiasing is there
+    // on both sides alike and only blurs where the edge is.
+    let (mut x0, mut y0, mut x1, mut y1) = (SIDE, SIDE, -1, -1);
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            if data[y as usize * stride + x as usize] >= 128 {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+    }
+    (x1 >= x0).then(|| Ink {
+        left: x0 - ORIGIN,
+        top: y0 - ORIGIN,
+        width: x1 - x0 + 1,
+        height: y1 - y0 + 1,
+    })
 }
 
 /// A chain: two rounded links, overlapping, on the diagonal, centred on
