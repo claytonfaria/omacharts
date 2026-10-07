@@ -4564,8 +4564,8 @@ impl Window {
     fn set_timeframe(self: &Rc<Self>, timeframe: Timeframe) {
         let pane = self.focused_pane();
         pane.timeframe.set(timeframe);
-        // Here rather than in each caller: the dropdown beside the symbol
-        // called this directly and left the strip pressed on the old one.
+        // Every way of changing the resolution ends here, so the strip
+        // follows whichever one it was.
         pane.sync_strip();
         self.store.set_setting(LAST_TIMEFRAME, &timeframe.key());
         // A promoted reset period changes with the resolution, so the legend
