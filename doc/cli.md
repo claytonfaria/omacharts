@@ -305,7 +305,8 @@ refreshed with `tools/build_taiwan_holidays.py` — so Thanksgiving is closed an
 the day after closes at 1pm. Past the last year written down, a holiday reads
 as a normal day, and futures and FX keep no holidays.
 
-With `--json`, `market` carries `phase` (`open`, `pre`, `post`, `closed`),
+With `--json`, `market` carries `phase` (`open`, `pre-market`, `post-market`,
+`closed`),
 `next_phase`, and `changes_at` as a Unix timestamp, or is `null`.
 
 A section can become a watchlist of its own, carrying its symbols with it:

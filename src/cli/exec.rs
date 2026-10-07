@@ -301,7 +301,7 @@ fn symbol_show(m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
 /// "open, closes in 2h 26m (16:00 New York)" — what the dot beside a chart's
 /// symbol says, and what its tooltip adds.
 fn market_line(market: &omacharts_engine::session::MarketStatus, now: i64) -> String {
-    let mut line = format!("{}, {}", market.phase.name(), market.countdown(now));
+    let mut line = format!("{}, {}", market.phase.key(), market.countdown(now));
     if let Some(at) = market.next_local(now) {
         line.push_str(&format!(" ({at})"));
     }

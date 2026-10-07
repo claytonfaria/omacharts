@@ -2253,14 +2253,7 @@ impl Window {
     /// and only that one: with four charts a clock in each is the same time
     /// four times.
     fn sync_clock(&self) {
-        let rects = self.layout_rects();
-        let right = self.chart_host.width().max(1) as f64;
-        let bottom = self.chart_host.height().max(1) as f64;
-        let corner = self.mounted().leaves().into_iter().find(|id| {
-            rects
-                .get(id)
-                .is_some_and(|(x, y, w, h)| x + w >= right - 0.5 && y + h >= bottom - 0.5)
-        });
+        let corner = self.chart_in_corner(false);
         for pane in self.panes.borrow().iter() {
             pane.set_shows_clock(Some(pane.id) == corner);
         }
@@ -2300,19 +2293,27 @@ impl Window {
             }
         }
 
-        // The rects tile the area exactly, so the chart under the window's
-        // corner is the one — the only one — holding its top right pixel.
-        let rects = self.layout_rects();
-        let right = self.chart_host.width().max(1) as f64;
-        let topmost = self.mounted().leaves().into_iter().find(|id| {
-            rects
-                .get(id)
-                .is_some_and(|(x, y, w, _)| *y <= 0.5 && x + w >= right - 0.5)
-        });
+        let topmost = self.chart_in_corner(true);
         for pane in self.panes.borrow().iter() {
             let margin = if Some(pane.id) == topmost { clearance } else { 0 };
             pane.set_corner_clearance(margin);
         }
+    }
+
+    /// The chart holding the window's top right corner, or its bottom right.
+    ///
+    /// The rects tile the area exactly, so the chart under a corner is the
+    /// one — the only one — holding that corner's pixel.
+    fn chart_in_corner(&self, top: bool) -> Option<u32> {
+        let rects = self.layout_rects();
+        let right = self.chart_host.width().max(1) as f64;
+        let bottom = self.chart_host.height().max(1) as f64;
+        self.mounted().leaves().into_iter().find(|id| {
+            rects.get(id).is_some_and(|(x, y, w, h)| {
+                let edge = if top { *y <= 0.5 } else { y + h >= bottom - 0.5 };
+                edge && x + w >= right - 0.5
+            })
+        })
     }
 
     fn build_node(self: &Rc<Self>, node: &Node, path: &[bool]) -> gtk::Widget {

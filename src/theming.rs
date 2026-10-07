@@ -303,8 +303,8 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
   background-color: @omacharts_market_open;
   box-shadow: 0 0 0 3px alpha(@omacharts_market_open, 0.2);
 }
-.market-dot.pre,
-.market-dot.post {
+.market-dot.pre-market,
+.market-dot.post-market {
   background-color: @omacharts_market_extended;
   box-shadow: 0 0 0 3px alpha(@omacharts_market_extended, 0.2);
 }

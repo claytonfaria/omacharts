@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use omacharts_engine::session::{self, Phase};
+use omacharts_engine::session;
 use omacharts_engine::{BarStyle, Indicator, Instrument, LinkGroup, Session, Theme, Timeframe};
 
 use crate::ui::chart::ChartView;
@@ -63,12 +63,9 @@ pub struct ChartPane {
     /// read at a glance and ignored the rest of the time. Hovering it says
     /// how long until that changes.
     market_dot: gtk::Box,
-    /// Which phase the dot is showing, so a tick that changes nothing touches
-    /// no widget.
-    market_phase: Cell<Option<Phase>>,
     /// When the dot next needs working out: the moment the market's phase
-    /// changes, or `None` once the symbol has, so the next tick asks at once.
-    market_due: Cell<Option<i64>>,
+    /// changes, or 0 once the symbol has, so the next tick asks at once.
+    market_due: Cell<i64>,
     /// The time, in the box where the price axis meets the time axis — space
     /// every chart has and none of them uses. Shown on one chart only, the one
     /// in the window's bottom right corner, which is where TradingView keeps
@@ -240,6 +237,10 @@ impl ChartPane {
         let clock = gtk::Label::new(None);
         clock.add_css_class("pane-clock");
         clock.add_css_class("numeric");
+        // A fixed width, so the text changing every second never changes the
+        // size the overlay has to lay out around.
+        clock.set_width_chars(8);
+        clock.set_xalign(1.0);
         clock.set_halign(gtk::Align::End);
         clock.set_valign(gtk::Align::End);
         clock.set_margin_end(8);
@@ -303,8 +304,7 @@ impl ChartPane {
             gear,
             link,
             market_dot,
-            market_phase: Cell::new(None),
-            market_due: Cell::new(None),
+            market_due: Cell::new(0),
             clock,
             expand,
             expand_icon,
@@ -431,24 +431,16 @@ impl ChartPane {
         // nothing to ask: the dot is worked out a few times a day, not every
         // second. Never again for something that never closes, or whose hours
         // are not known, until the symbol changes.
-        if self.market_due.get().is_some_and(|due| now < due) {
+        if now < self.market_due.get() {
             return;
         }
         let status = self.instrument.borrow().as_ref().and_then(|i| session::status(i, now));
-        let due = status.and_then(|s| s.next).map_or(i64::MAX, |(_, at)| at);
-        self.market_due.set(Some(due));
-        let phase = status.map(|s| s.phase);
-        let was = self.market_phase.replace(phase);
-        if was == phase {
-            return;
+        self.market_due.set(status.and_then(|s| s.next).map_or(i64::MAX, |(_, at)| at));
+        match status {
+            Some(status) => self.market_dot.set_css_classes(&["market-dot", status.phase.key()]),
+            None => self.market_dot.set_css_classes(&["market-dot"]),
         }
-        if let Some(was) = was {
-            self.market_dot.remove_css_class(was.key());
-        }
-        if let Some(phase) = phase {
-            self.market_dot.add_css_class(phase.key());
-        }
-        self.market_dot.set_visible(phase.is_some());
+        self.market_dot.set_visible(status.is_some());
     }
 
     /// Show the clock on this chart, or not. Only one chart in the window
@@ -482,7 +474,7 @@ impl ChartPane {
         self.write_timeframe();
         // A new symbol can be a different market, and the dot should not wait
         // up to a second, or until the old market's next bell, to say so.
-        self.market_due.set(None);
+        self.market_due.set(0);
         self.tick(chrono::Utc::now().timestamp());
     }
 
@@ -981,23 +973,24 @@ mod tests {
     #[test]
     fn the_clock_and_market_tooltips_are_markup_that_parses() {
         let now = 1_791_351_000; // a Wednesday, Oct 2026
+        let share = Instrument {
+            symbol: "X".into(),
+            name: "X".into(),
+            kind: omacharts_engine::InstrumentKind::Equity,
+            suffix: None,
+            currency: None,
+            tier: 0,
+            session_origin: 0,
+            overrides: Vec::new(),
+            exchange: None,
+            popularity: 0,
+            local_name: None,
+        };
         for at in (0..7 * 24).map(|h| now + h * 3600) {
             let clock = clock_tooltip(at);
             assert!(gtk::pango::parse_markup(&clock, '\0').is_ok(), "{clock}");
             for kind in [omacharts_engine::InstrumentKind::Equity, omacharts_engine::InstrumentKind::Crypto] {
-                let instrument = Instrument {
-                    symbol: "X".into(),
-                    name: "X".into(),
-                    kind,
-                    suffix: None,
-                    currency: None,
-                    tier: 0,
-                    session_origin: 0,
-                    overrides: Vec::new(),
-                    exchange: None,
-                    popularity: 0,
-                    local_name: None,
-                };
+                let instrument = Instrument { kind, ..share.clone() };
                 let status = session::status(&instrument, at).unwrap();
                 let text = market_tooltip(&status, at);
                 assert!(gtk::pango::parse_markup(&text, '\0').is_ok(), "{text}");

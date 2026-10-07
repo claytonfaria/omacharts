@@ -18,7 +18,9 @@ Run: tools/build_taiwan_holidays.py
 import json
 import pathlib
 import sys
-import urllib.request
+
+# The same User-Agent and timeout as the other tools.
+from build_listings import fetch
 
 FEED = "https://www.twse.com.tw/rwd/en/holidaySchedule/holidaySchedule?response=json"
 CALENDAR = pathlib.Path(__file__).resolve().parent.parent / (
@@ -31,10 +33,8 @@ HEADER = """\
 """
 
 
-def fetch():
-    request = urllib.request.Request(FEED, headers={"User-Agent": "omacharts"})
-    with urllib.request.urlopen(request, timeout=30) as reply:
-        body = json.load(reply)
+def schedule():
+    body = json.loads(fetch(FEED))
     if body.get("stat") != "ok" or not body.get("data"):
         sys.exit(f"the exchange did not answer with a schedule: {body.get('stat')!r}")
     return body["queryYear"], {date: name.strip() for date, name in body["data"]}
@@ -52,7 +52,7 @@ def existing():
 
 
 def main():
-    year, fresh = fetch()
+    year, fresh = schedule()
     rows = {d: n for d, n in existing().items() if not d.startswith(f"{year}-")}
     rows.update(fresh)
     body = "".join(f"{date} {rows[date]}\n" for date in sorted(rows))
