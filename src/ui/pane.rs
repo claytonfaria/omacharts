@@ -551,10 +551,13 @@ fn draw_key(
     cr.select_font_face(family, gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
     cr.set_font_size(10.5);
     set_source(cr, colour);
+    // Centred on the key by the digit's ink, not its advance, and not rounded:
+    // a whole logical pixel is two on a doubled screen, which is a visible
+    // lean in a key this small.
     if let Ok(e) = cr.text_extents(label) {
-        let x = (w - e.width()) / 2.0 - e.x_bearing();
-        let y = (h - e.height()) / 2.0 - e.y_bearing();
-        cr.move_to(x.round(), y.round());
+        let x = w / 2.0 - e.width() / 2.0 - e.x_bearing();
+        let y = top + (key_h - 1.0) / 2.0 - e.height() / 2.0 - e.y_bearing();
+        cr.move_to(x, y);
         let _ = cr.show_text(label);
     }
 }
