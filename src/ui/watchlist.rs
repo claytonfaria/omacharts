@@ -130,12 +130,19 @@ impl Column {
         }
     }
 
+    /// How wide the column is before anybody drags it.
+    ///
+    /// A character more than the number needs, because the gap between two
+    /// columns belongs to the column rather than to the box holding them:
+    /// spacing between cells is room the layout owns and a drag cannot take
+    /// away, and it counts towards the width below which GTK will not
+    /// shrink a column — which is a floor you can feel and cannot see.
     fn width_chars(self) -> i32 {
         match self {
             Column::Symbol => 0,
-            Column::Last => 9,
-            Column::Change => 8,
-            Column::ChangePct => 7,
+            Column::Last => 10,
+            Column::Change => 9,
+            Column::ChangePct => 8,
         }
     }
 }
@@ -169,11 +176,11 @@ pub fn columns_to_string(columns: &[Column]) -> String {
 
 /// How narrow and how wide a column may be dragged.
 ///
-/// The floor is about four digits and a decimal point: narrower than that
-/// and a price is ellipsis rather than information. The ceiling is half the
-/// rail, because a column that can eat the symbol beside it is a rail you
-/// cannot read.
-const MIN_WIDTH: i32 = 44;
+/// The floor is low on purpose: a column squeezed to nothing much is a
+/// choice somebody is allowed to make, and the cells ellipsise rather than
+/// hold the rail open against them. The ceiling is half the rail, because a
+/// column that can eat the symbol beside it is a rail you cannot read.
+const MIN_WIDTH: i32 = 24;
 const MAX_WIDTH: i32 = 200;
 
 /// The widths somebody has dragged columns to, as `last:96,change_pct:72`.
@@ -352,29 +359,16 @@ fn between(above: &gtk::ListBoxRow, below: &gtk::ListBoxRow) -> i32 {
 
 /// How far either side of a boundary counts as grabbing it.
 ///
-/// Ten rather than the four this started as: four is the boundary between
-/// two allocations, which is a place the layout knows about and the reader
-/// does not. A handle has to be found with a pointer before it can be
-/// dragged with one, and seven pixels of invisible target is a handle that
-/// is not there at all.
-const GRIP_REACH: f64 = 10.0;
+/// Six. It was four, which was unusable: four pixels either side of a
+/// boundary nothing marked, so the handle could not be found at all. The
+/// answer to that turned out to be showing every boundary while the pointer
+/// is in the row rather than widening the target — with the lines there to
+/// aim at, a reach much wider than the mark starts catching presses that
+/// were meant for the title beside it.
+const GRIP_REACH: f64 = 6.0;
 
 /// How far a press may travel and still be a click rather than a drag.
 const CLICK_SLOP: f64 = 4.0;
-
-/// The boundary `x` is near enough to drag, if it is near one.
-///
-/// Boundaries are the left edges of the columns after the first: the first
-/// has the rail's own edge on its left, and that is not a width.
-fn boundary_near(header: &gtk::Box, x: f64) -> Option<usize> {
-    let mut count = 0;
-    let mut child = header.first_child();
-    while let Some(widget) = child {
-        child = widget.next_sibling();
-        count += 1;
-    }
-    (1..count).find(|at| (x - gap_x(header, *at) as f64).abs() <= GRIP_REACH)
-}
 
 /// The columns after `moving` is dropped in the `at`th gap, or nothing when
 /// that is the gap it already sits in.
@@ -648,7 +642,7 @@ impl Watchlist {
         // The column titles, lined up over the cells: a row's box starts 26px
         // from the rail's edge (see the switcher above) and ends 24px from the
         // other, 6px of Adwaita's row margin and 8 of padding past its own 10.
-        let column_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let column_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         // Named so the stylesheet can take GTK's drop outline off this one
         // row without touching the drop feedback on the symbols below.
         column_header.add_css_class("column-headings");
@@ -1685,7 +1679,7 @@ impl Watchlist {
         instrument: &Instrument,
     ) -> (gtk::ListBoxRow, Vec<(Column, gtk::Label)>) {
         let quote = (self.quote)(instrument);
-        let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         row_box.set_margin_top(4);
         row_box.set_margin_bottom(4);
         row_box.set_margin_start(12);
@@ -1822,6 +1816,47 @@ impl Watchlist {
         for (offset, kind) in reordered.into_iter().enumerate() {
             rows[start + offset] = kind;
         }
+    }
+
+    /// Where the `at`th divide between columns is, measured on the cells in
+    /// the rows rather than on the titles over them.
+    ///
+    /// The headings are not the columns. A heading row and a row of symbols
+    /// carry different margins and give their stretchy first column
+    /// different amounts of room, so the gap between two titles and the gap
+    /// between the numbers under them land in different places — and a
+    /// handle belongs on the one the reader can see, which is where the data
+    /// divides.
+    fn column_edge(&self, at: usize) -> Option<i32> {
+        let column = *self.columns.borrow().get(at)?;
+        let cell = self.rows.borrow().iter().find_map(|kind| match kind {
+            RowKind::Entry { cells, .. } => {
+                cells.iter().find(|(c, _)| *c == column).map(|(_, label)| label.clone())
+            }
+            RowKind::Header { .. } => None,
+        })?;
+        let mine = cell.compute_bounds(&self.column_header)?;
+        // Halfway across the gutter between this column and the one before
+        // it, which is the line the eye draws between them.
+        match cell.prev_sibling().and_then(|before| before.compute_bounds(&self.column_header)) {
+            Some(before) => Some(((before.x() + before.width() + mine.x()) / 2.0).round() as i32),
+            None => Some(mine.x().round() as i32),
+        }
+    }
+
+    /// Where a mark stands for the `at`th divide: on the cells' own edge,
+    /// and on the titles' only when there are no rows to measure.
+    fn divide_x(&self, at: usize) -> i32 {
+        self.column_edge(at).unwrap_or_else(|| gap_x(&self.column_header, at))
+    }
+
+    /// The divide `x` is near enough to drag, if it is near one.
+    ///
+    /// The first column has the rail's own edge on its left, and that is not
+    /// a width.
+    fn boundary_near(&self, x: f64) -> Option<usize> {
+        (1..self.columns.borrow().len())
+            .find(|at| (x - self.divide_x(*at) as f64).abs() <= GRIP_REACH)
     }
 
     /// The column titles, each one sorting by itself when clicked, with an
@@ -1986,11 +2021,12 @@ impl Watchlist {
         let header = self.column_header.clone();
         let mark = marker.clone();
         let at_now = showing.clone();
+        let this = self.clone();
         target.connect_motion(move |_, x, _| {
             let at = gap_at(&header, x).max(1);
             if at_now.get() != Some(at) {
                 at_now.set(Some(at));
-                mark.set_margin_start(gap_x(&header, at));
+                mark.set_margin_start(this.divide_x(at));
                 mark.set_visible(true);
             }
             gtk::gdk::DragAction::MOVE
@@ -2128,11 +2164,11 @@ impl Watchlist {
         if !self.grips_shown.get() {
             self.grips_shown.set(true);
             for (at, grip) in grips.iter().enumerate() {
-                grip.set_margin_start(gap_x(&self.column_header, at + 1));
+                grip.set_margin_start(self.divide_x(at + 1));
                 grip.set_visible(true);
             }
         }
-        let at = boundary_near(&self.column_header, x);
+        let at = self.boundary_near(x);
         if self.gripped.get() == at {
             return;
         }
@@ -2162,17 +2198,33 @@ impl Watchlist {
     }
 
     /// What a column is as wide as now: what it was dragged to, or what the
-    /// title is currently given.
+    /// cells in it are currently given.
+    ///
+    /// The cells rather than the title. A title is a word in a box of its
+    /// own and is often narrower than the column it names — starting a drag
+    /// from that number put the first few pixels of travel into catching up
+    /// with the real width, or into a clamp, which is a handle that moves
+    /// and a column that does not.
     fn width_now(&self, column: Column) -> i32 {
         if let Some((_, width)) = self.column_widths.borrow().iter().find(|(c, _)| *c == column) {
             return *width;
         }
-        self.column_labels
-            .borrow()
-            .iter()
-            .find(|(c, _)| *c == column)
-            .map(|(_, label)| label.width())
-            .unwrap_or(MIN_WIDTH)
+        let cell = self.rows.borrow().iter().find_map(|kind| match kind {
+            RowKind::Entry { cells, .. } => {
+                cells.iter().find(|(c, _)| *c == column).map(|(_, label)| label.width())
+            }
+            RowKind::Header { .. } => None,
+        });
+        cell.or_else(|| {
+            self.column_labels
+                .borrow()
+                .iter()
+                .find(|(c, _)| *c == column)
+                .map(|(_, label)| label.width())
+        })
+        .filter(|width| *width > 0)
+        .unwrap_or(MIN_WIDTH)
+        .clamp(MIN_WIDTH, MAX_WIDTH)
     }
 
     fn remember_width(&self, column: Column, width: i32) {
@@ -2209,7 +2261,8 @@ impl Watchlist {
         let this = self.clone();
         let held = holding.clone();
         drag.connect_drag_begin(move |drag, x, _| {
-            let boundary = boundary_near(&this.column_header, x)
+            let boundary = this
+                .boundary_near(x)
                 .and_then(|at| this.columns.borrow().get(at).copied())
                 .filter(|column| *column != Column::Symbol);
             match boundary {
@@ -2228,7 +2281,16 @@ impl Watchlist {
         let held = holding.clone();
         drag.connect_drag_update(move |_, moved, _| {
             let Some((column, start, from)) = held.get() else { return };
-            this.apply_width(column, dragged_width(start, moved));
+            let width = dragged_width(start, moved);
+            // Carried past a limit, the column stops but the pointer does
+            // not, and the gap between them would otherwise have to be
+            // walked back before anything moved again. Moving the anchor to
+            // wherever the pointer is instead means the way out of a limit
+            // costs one pixel, like every other part of the drag.
+            if width != (start - moved.round() as i32) {
+                held.set(Some((column, width + moved.round() as i32, from)));
+            }
+            this.apply_width(column, width);
             // The line follows the pointer rather than waiting for the
             // layout that is about to happen behind it.
             if let Some(grip) = this.gripped.get().and_then(|at| {

@@ -516,15 +516,19 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    at the dimming Adwaita gives a `.dim-label` — so the mark belongs to the
    row rather than sitting on top of it. The hover one is the same grey,
    quieter, because it is the same thing not yet happening. */
-.column-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.55); }
-.column-grip { border-radius: 1px; background: alpha(@window_fg_color, 0.25); }
-/* The one the pointer could actually grab, in the weight the drop mark has. */
-.column-grip-on { background: alpha(@window_fg_color, 0.55); }
+/* Three weights of the same grey, quietest first: a boundary that is merely
+   there, the one the pointer could grab, and a drop that is about to
+   happen. The handles sit on the row whenever it is hovered, so they stay
+   under the content; the drop mark only appears mid-drag, when the reader
+   is already committed, so it can be the definite one. */
+.column-grip { border-radius: 1px; background: alpha(@window_fg_color, 0.12); }
+.column-grip-on { background: alpha(@window_fg_color, 0.24); }
+.column-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.42); }
 
 /* And lying down, between the symbols, for the same reason: a line where
    the dragged one will be inserted says more than a frame round whichever
    row the pointer happens to be over, so the rows lose the frame. */
-.row-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.55); }
+.row-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.42); }
 .symbol-row:drop(active),
 .section-row:drop(active) {
   outline: none;
