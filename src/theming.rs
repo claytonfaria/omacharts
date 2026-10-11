@@ -240,6 +240,14 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
     define("omacharts_up", &scheme.up);
     define("omacharts_down", &scheme.down);
 
+    // The palette's own blue — what `--color blue` paints a drawing with —
+    // so the one place the UI asks for blue by name gets the theme's blue
+    // rather than a hex of its own.
+    define(
+        "omacharts_blue",
+        &theme.swatch("Blue").map(|s| s.hex.clone()).unwrap_or_else(|| ui.accent.clone()),
+    );
+
     // The frame around tiled charts. Derived, not taken: the engine explains
     // why in `frame.rs`, and `doc/themes/frames.html` shows the result on
     // every theme.
@@ -510,14 +518,9 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    band is as short as it can be without the line crowding what is above. */
 .rail-header { margin-top: 30px; min-height: 6px; }
 
-/* Where a column being dragged would land: a line in the gap it would take,
-   in the accent colour the rest of the app marks a choice with. */
-.column-drop {
-  min-width: 2px;
-  margin: 1px 2px;
-  border-radius: 1px;
-  background: @accent_bg_color;
-}
+/* Where a column being dragged would land: a short tick standing in the gap
+   it would take, in the palette's blue. */
+.column-drop { border-radius: 1px; background: @omacharts_blue; }
 
 /* The watchlist's name, in the band the corner controls already reserved.
    Text with a chevron rather than a button: it names what you are looking at,
@@ -726,6 +729,7 @@ mod tests {
         assert!(css.contains(&theme.ui.accent));
         assert!(css.contains("@define-color omacharts_up "));
         assert!(css.contains("@define-color omacharts_down "));
+        assert!(css.contains("@define-color omacharts_blue "));
     }
 
     #[test]

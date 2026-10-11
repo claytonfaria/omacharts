@@ -242,17 +242,23 @@ enum Rank {
     Price(Option<f64>),
 }
 
-/// Which gap between the column titles `x` falls in, counted in columns.
+/// A column on its way to another place in the header.
 ///
-/// The marker is a child of the header too, and is not a gap of its own.
-fn gap_at(header: &gtk::Box, marker: &gtk::Box, x: f64) -> usize {
+/// A type of its own rather than the column's key as a string, because a
+/// drop target matches on the type it is offered: the symbols below take a
+/// string, and sharing one with them lit every row up as somewhere a column
+/// could be dropped. Nothing but the header accepts this, and the header
+/// accepts nothing else.
+#[derive(Clone, Copy, glib::Boxed)]
+#[boxed_type(name = "OmachartsColumnDrag")]
+struct ColumnDrag(Column);
+
+/// Which gap between the column titles `x` falls in, counted in columns.
+fn gap_at(header: &gtk::Box, x: f64) -> usize {
     let mut at = 0;
     let mut child = header.first_child();
     while let Some(widget) = child {
         child = widget.next_sibling();
-        if widget == *marker.upcast_ref::<gtk::Widget>() {
-            continue;
-        }
         let middle = widget.allocation().x() as f64 + widget.width() as f64 / 2.0;
         if x < middle {
             break;
@@ -262,32 +268,23 @@ fn gap_at(header: &gtk::Box, marker: &gtk::Box, x: f64) -> usize {
     at
 }
 
-/// Put the marker in the `at`th gap, and leave it alone if it is already
-/// there — a drag sends motion far more often than it crosses a title.
-fn move_marker(header: &gtk::Box, marker: &gtk::Box, at: usize) {
-    if marker.is_visible() && gap_at(header, marker, marker_middle(marker)) == at {
-        return;
-    }
-    let mut after: Option<gtk::Widget> = None;
+/// Where the line stands for the `at`th gap: against the near edge of the
+/// title that would follow it, or past the last one at the end of the row.
+fn gap_x(header: &gtk::Box, at: usize) -> i32 {
     let mut seen = 0;
+    let mut last = 0;
     let mut child = header.first_child();
     while let Some(widget) = child {
         child = widget.next_sibling();
-        if widget == *marker.upcast_ref::<gtk::Widget>() {
-            continue;
-        }
         if seen == at {
-            break;
+            return (widget.allocation().x() - 3).max(0);
         }
+        last = widget.allocation().x() + widget.width();
         seen += 1;
-        after = Some(widget);
     }
-    header.reorder_child_after(marker, after.as_ref());
-    marker.set_visible(true);
-}
-
-fn marker_middle(marker: &gtk::Box) -> f64 {
-    marker.allocation().x() as f64 + marker.width() as f64 / 2.0
+    // Past the last title is the rail's own edge, so the line stands just
+    // inside it rather than half off the end.
+    (last - 2).max(0)
 }
 
 /// The columns after `moving` is dropped in the `at`th gap, or nothing when
@@ -511,21 +508,35 @@ impl Watchlist {
         // The column titles, lined up over the cells: a row's box starts 26px
         // from the rail's edge (see the switcher above) and ends 24px from the
         // other, 6px of Adwaita's row margin and 8 of padding past its own 10.
+        let column_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+
+        // A tick between two titles rather than a rule down the row: it says
+        // where the column lands without reading as a divider between them.
+        // Over the titles rather than among them, so nothing shifts while a
+        // column is being carried, and never a drop target of its own.
         let column_marker = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column_marker.add_css_class("column-drop");
+        column_marker.set_size_request(2, 11);
+        column_marker.set_halign(gtk::Align::Start);
+        column_marker.set_valign(gtk::Align::Center);
+        column_marker.set_can_target(false);
         column_marker.set_visible(false);
 
-        let column_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        column_header.set_margin_start(26);
-        column_header.set_margin_end(24);
-        column_header.set_margin_top(4);
-        column_header.set_margin_bottom(2);
+        // The margins belong to the overlay, so a title's own x is the one
+        // the line is placed at.
+        let columns_over_rows = gtk::Overlay::new();
+        columns_over_rows.set_child(Some(&column_header));
+        columns_over_rows.add_overlay(&column_marker);
+        columns_over_rows.set_margin_start(26);
+        columns_over_rows.set_margin_end(24);
+        columns_over_rows.set_margin_top(4);
+        columns_over_rows.set_margin_bottom(2);
 
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
         widget.set_size_request(248, -1);
         widget.append(&band);
         widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        widget.append(&column_header);
+        widget.append(&columns_over_rows);
         widget.append(&trouble);
         widget.append(&scroller);
 
@@ -1676,9 +1687,8 @@ impl Watchlist {
             // of the two the gesture turns out to be.
             let source = gtk::DragSource::new();
             source.set_actions(gtk::gdk::DragAction::MOVE);
-            let key = column.key();
             source.connect_prepare(move |_, _, _| {
-                Some(gtk::gdk::ContentProvider::for_value(&key.to_value()))
+                Some(gtk::gdk::ContentProvider::for_value(&ColumnDrag(column).to_value()))
             });
             // What you are dragging: the title itself, under the pointer,
             // which is the widget we already have rather than a drawing of it.
@@ -1690,43 +1700,53 @@ impl Watchlist {
             label.add_controller(source);
             self.column_header.append(&label);
         }
-        // The marker lives with the titles and is cleared away with them, so
-        // it goes back after each rebuild rather than being wired again.
         self.column_marker.set_visible(false);
-        self.column_header.append(&self.column_marker);
     }
 
-    /// Where a dragged column would land: a line in the gap it would go into,
-    /// which moves between the titles as the pointer does.
+    /// Where a dragged column would land: a short line standing in the gap it
+    /// would go into, which moves between the titles as the pointer does.
     ///
-    /// The marker is a child of the header like the titles are, so the gap
-    /// opens where the column will actually be and nothing is drawn by hand.
-    /// A motion works out which gap the pointer is in and moves the marker
-    /// there if it is somewhere else; that is the whole of the per-motion
-    /// work.
+    /// Over the titles rather than among them, so the header does not open a
+    /// gap and shuffle sideways while a column is being carried — the line
+    /// says where it would land, and nothing else moves until it does.
+    /// A motion works out which gap the pointer is in and moves the line only
+    /// when that answer changes; that is the whole of the per-motion work.
     fn wire_column_drop(self: &Rc<Self>) {
         let marker = self.column_marker.clone();
-        let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+        let target = gtk::DropTarget::new(ColumnDrag::static_type(), gtk::gdk::DragAction::MOVE);
+        // Which gap the line is standing in, so a motion inside the same gap
+        // costs the lookup and nothing else.
+        let showing: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
 
         let header = self.column_header.clone();
         let mark = marker.clone();
+        let at_now = showing.clone();
         target.connect_motion(move |_, x, _| {
-            let at = gap_at(&header, &mark, x);
-            move_marker(&header, &mark, at);
+            let at = gap_at(&header, x);
+            if at_now.get() != Some(at) {
+                at_now.set(Some(at));
+                mark.set_margin_start(gap_x(&header, at));
+                mark.set_visible(true);
+            }
             gtk::gdk::DragAction::MOVE
         });
 
         let mark = marker.clone();
-        target.connect_leave(move |_| mark.set_visible(false));
+        let at_now = showing.clone();
+        target.connect_leave(move |_| {
+            at_now.set(None);
+            mark.set_visible(false);
+        });
 
         let this = self.clone();
         let header = self.column_header.clone();
         let mark = marker.clone();
+        let at_now = showing.clone();
         target.connect_drop(move |_, value, x, _| {
+            at_now.set(None);
             mark.set_visible(false);
-            let Ok(key) = value.get::<String>() else { return false };
-            let Some(moving) = Column::from_key(&key) else { return false };
-            let at = gap_at(&header, &mark, x);
+            let Ok(ColumnDrag(moving)) = value.get::<ColumnDrag>() else { return false };
+            let at = gap_at(&header, x);
             let Some(columns) = dropped(&this.columns.borrow(), moving, at) else { return false };
             this.set_columns(columns);
             true
