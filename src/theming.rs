@@ -240,14 +240,6 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
     define("omacharts_up", &scheme.up);
     define("omacharts_down", &scheme.down);
 
-    // The palette's own blue — what `--color blue` paints a drawing with —
-    // so the one place the UI asks for blue by name gets the theme's blue
-    // rather than a hex of its own.
-    define(
-        "omacharts_blue",
-        &theme.swatch("Blue").map(|s| s.hex.clone()).unwrap_or_else(|| ui.accent.clone()),
-    );
-
     // The frame around tiled charts. Derived, not taken: the engine explains
     // why in `frame.rs`, and `doc/themes/frames.html` shows the result on
     // every theme.
@@ -518,9 +510,25 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    band is as short as it can be without the line crowding what is above. */
 .rail-header { margin-top: 30px; min-height: 6px; }
 
-/* Where a column being dragged would land: a short tick standing in the gap
-   it would take, in the palette's blue. */
-.column-drop { border-radius: 1px; background: @omacharts_blue; }
+/* The two states of one mark on the heading row: where a column being
+   dragged would land, and which boundary the pointer could drag to resize.
+   Both are the colour the headings are written in — the window's foreground
+   at the dimming Adwaita gives a `.dim-label` — so the mark belongs to the
+   row rather than sitting on top of it. The hover one is the same grey,
+   quieter, because it is the same thing not yet happening. */
+.column-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.55); }
+.column-grip { border-radius: 1px; background: alpha(@window_fg_color, 0.25); }
+
+/* And lying down, between the symbols, for the same reason: a line where
+   the dragged one will be inserted says more than a frame round whichever
+   row the pointer happens to be over, so the rows lose the frame. */
+.row-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.55); }
+.symbol-row:drop(active) {
+  outline: none;
+  box-shadow: none;
+  background: none;
+  background-image: none;
+}
 
 /* The tick is the whole of the answer, so the headings do not also wear the
    frame GTK draws around a drop target. Only this row: the symbols below
@@ -739,9 +747,13 @@ mod tests {
         assert!(css.contains(&theme.ui.accent));
         assert!(css.contains("@define-color omacharts_up "));
         assert!(css.contains("@define-color omacharts_down "));
-        assert!(css.contains("@define-color omacharts_blue "));
+        // The marks on the heading row are the headings' own colour rather
+        // than a colour of their own.
+        assert!(css.contains(".column-drop { border-radius: 1px; background: alpha(@window_fg_color"));
+        assert!(css.contains(".column-grip { border-radius: 1px; background: alpha(@window_fg_color"));
         // The headings carry the drop tick alone; a frame as well is noise.
         assert!(css.contains(".column-headings:drop(active)"));
+        assert!(css.contains(".symbol-row:drop(active)"));
     }
 
     #[test]

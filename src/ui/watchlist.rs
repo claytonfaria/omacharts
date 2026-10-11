@@ -167,6 +167,56 @@ pub fn columns_to_string(columns: &[Column]) -> String {
     columns.iter().map(|c| c.key()).collect::<Vec<_>>().join(",")
 }
 
+/// How narrow and how wide a column may be dragged.
+///
+/// The floor is about four digits and a decimal point: narrower than that
+/// and a price is ellipsis rather than information. The ceiling is half the
+/// rail, because a column that can eat the symbol beside it is a rail you
+/// cannot read.
+const MIN_WIDTH: i32 = 44;
+const MAX_WIDTH: i32 = 200;
+
+/// The widths somebody has dragged columns to, as `last:96,change_pct:72`.
+///
+/// Read like the column list itself: anything unparseable, out of range, or
+/// naming a column that is not a column falls out, and what is left is a
+/// width for the columns that have one. A column with none keeps the width
+/// its contents ask for.
+pub fn parse_widths(stored: Option<&str>) -> Vec<(Column, i32)> {
+    let mut widths: Vec<(Column, i32)> = Vec::new();
+    for pair in stored.unwrap_or_default().split(',') {
+        let Some((key, value)) = pair.split_once(':') else { continue };
+        let Some(column) = Column::from_key(key.trim()) else { continue };
+        // The symbol column takes whatever the others leave, so a width for
+        // it would be a number the layout ignores.
+        if column == Column::Symbol {
+            continue;
+        }
+        let Ok(width) = value.trim().parse::<i32>() else { continue };
+        if !(MIN_WIDTH..=MAX_WIDTH).contains(&width) {
+            continue;
+        }
+        if widths.iter().any(|(c, _)| *c == column) {
+            continue;
+        }
+        widths.push((column, width));
+    }
+    widths
+}
+
+pub fn widths_to_string(widths: &[(Column, i32)]) -> String {
+    widths.iter().map(|(c, w)| format!("{}:{w}", c.key())).collect::<Vec<_>>().join(",")
+}
+
+/// The width a column is dragged to: where the boundary started, plus how
+/// far the pointer has carried it, held between the two limits.
+///
+/// A boundary is a column's left edge and the columns are packed against the
+/// right, so carrying it left makes that column wider.
+fn dragged_width(start: i32, moved: f64) -> i32 {
+    (start - moved.round() as i32).clamp(MIN_WIDTH, MAX_WIDTH)
+}
+
 /// How a watchlist's rows are ordered within each section, when not in the
 /// order they were put there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -287,9 +337,33 @@ fn gap_x(header: &gtk::Box, at: usize) -> i32 {
     (last - 2).max(0)
 }
 
+/// How far either side of a boundary counts as grabbing it.
+const GRIP_REACH: f64 = 4.0;
+
+/// The boundary `x` is near enough to drag, if it is near one.
+///
+/// Boundaries are the left edges of the columns after the first: the first
+/// has the rail's own edge on its left, and that is not a width.
+fn boundary_near(header: &gtk::Box, x: f64) -> Option<usize> {
+    let mut count = 0;
+    let mut child = header.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        count += 1;
+    }
+    (1..count).find(|at| (x - gap_x(header, *at) as f64).abs() <= GRIP_REACH)
+}
+
 /// The columns after `moving` is dropped in the `at`th gap, or nothing when
 /// that is the gap it already sits in.
 fn dropped(columns: &[Column], moving: Column, at: usize) -> Option<Vec<Column>> {
+    // The symbol column does not move, and nothing lands in front of it:
+    // a drop over on that side takes the nearest place that is really a
+    // place, which is straight after it.
+    if moving == Column::Symbol {
+        return None;
+    }
+    let at = at.max(1);
     let from = columns.iter().position(|c| *c == moving)?;
     // The gaps are counted among the columns as they stand, so a gap after
     // the one being moved loses a place once it is taken out.
@@ -397,6 +471,23 @@ pub struct Watchlist {
     column_header: gtk::Box,
     /// The line that says where a column being dragged would land.
     column_marker: gtk::Box,
+    /// Where a symbol being dragged will be inserted.
+    row_marker: gtk::Box,
+    /// Where that line is now, so motion over one row costs nothing after
+    /// the first event.
+    row_marked: Cell<i32>,
+    /// The same line, quieter, on the boundary the pointer could drag.
+    column_grip: gtk::Box,
+    /// The title widgets, so a width can be applied without a rebuild.
+    column_labels: RefCell<Vec<(Column, gtk::Label)>>,
+    /// What each column has been dragged to, for the ones that have been.
+    column_widths: RefCell<Vec<(Column, i32)>>,
+    /// Which boundary the grip is sitting on, so a motion inside the same
+    /// few pixels costs the lookup and nothing else.
+    gripped: Cell<Option<usize>>,
+    /// Set while a column is being carried, so the hover line stays out of
+    /// the way of the one that says where it will land.
+    carrying: Cell<bool>,
     /// How the list on screen is sorted, read from the store on every rebuild.
     sort: Cell<Option<Sort>>,
     /// Set while we are selecting a row ourselves, so rebuilding does not
@@ -426,6 +517,11 @@ pub struct Watchlist {
 }
 
 const SETTING_COLUMNS: &str = "watchlist_columns";
+/// Beside the column list, because a width belongs to the rail's shape the
+/// way the columns themselves do: one rail, one set of columns, one set of
+/// widths, whichever watchlist is in it. The sort is the other kind of
+/// state — it is about a list's contents, so it is kept per list.
+const SETTING_WIDTHS: &str = "watchlist_column_widths";
 const SETTING_ACTIVE: &str = "active_watchlist";
 
 impl Watchlist {
@@ -440,8 +536,25 @@ impl Watchlist {
         list.set_selection_mode(gtk::SelectionMode::Single);
         list.add_css_class("navigation-sidebar");
 
+        // The same mark again, lying down: where a symbol being dragged will
+        // be inserted. Over the list rather than between the rows, so the
+        // rows do not open a gap and shuffle while one is being carried.
+        let row_marker = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row_marker.add_css_class("row-drop");
+        row_marker.set_size_request(-1, 2);
+        row_marker.set_margin_start(8);
+        row_marker.set_margin_end(8);
+        row_marker.set_halign(gtk::Align::Fill);
+        row_marker.set_valign(gtk::Align::Start);
+        row_marker.set_can_target(false);
+        row_marker.set_visible(false);
+
+        let rows_under_mark = gtk::Overlay::new();
+        rows_under_mark.set_child(Some(&list));
+        rows_under_mark.add_overlay(&row_marker);
+
         let scroller = gtk::ScrolledWindow::new();
-        scroller.set_child(Some(&list));
+        scroller.set_child(Some(&rows_under_mark));
         scroller.set_vexpand(true);
         scroller.set_hscrollbar_policy(gtk::PolicyType::Never);
 
@@ -525,11 +638,23 @@ impl Watchlist {
         column_marker.set_can_target(false);
         column_marker.set_visible(false);
 
+        // The same mark in its quiet state: same length, same width, same
+        // place, so the boundary you can drag and the gap a column will land
+        // in are plainly one idea.
+        let column_grip = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        column_grip.add_css_class("column-grip");
+        column_grip.set_size_request(2, 11);
+        column_grip.set_halign(gtk::Align::Start);
+        column_grip.set_valign(gtk::Align::Center);
+        column_grip.set_can_target(false);
+        column_grip.set_visible(false);
+
         // The margins belong to the overlay, so a title's own x is the one
         // the line is placed at.
         let columns_over_rows = gtk::Overlay::new();
         columns_over_rows.set_child(Some(&column_header));
         columns_over_rows.add_overlay(&column_marker);
+        columns_over_rows.add_overlay(&column_grip);
         columns_over_rows.set_margin_start(26);
         columns_over_rows.set_margin_end(24);
         columns_over_rows.set_margin_top(4);
@@ -544,6 +669,7 @@ impl Watchlist {
         widget.append(&scroller);
 
         let columns = parse_columns(store.setting(SETTING_COLUMNS).as_deref());
+        let widths = parse_widths(store.setting(SETTING_WIDTHS).as_deref());
         // A watchlist deleted in another window, or a setting from a database
         // that has been rolled back, leaves an id pointing at nothing. The
         // default is the one that is always there to fall back to.
@@ -566,6 +692,13 @@ impl Watchlist {
             columns: RefCell::new(columns),
             column_header: column_header.clone(),
             column_marker: column_marker.clone(),
+            column_grip: column_grip.clone(),
+            row_marker: row_marker.clone(),
+            row_marked: Cell::new(-1),
+            column_labels: RefCell::new(Vec::new()),
+            column_widths: RefCell::new(widths),
+            gripped: Cell::new(None),
+            carrying: Cell::new(false),
             sort: Cell::new(None),
             quiet: Cell::new(false),
             link: link.clone(),
@@ -607,6 +740,7 @@ impl Watchlist {
         watchlist.wire_click_to_focus();
         watchlist.wire_switcher();
         watchlist.wire_column_drop();
+        watchlist.wire_column_resize();
         watchlist.rebuild();
         watchlist
     }
@@ -1417,8 +1551,16 @@ impl Watchlist {
         // empty section. Dropping a section on one puts it beside that section.
         let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
         let this = self.clone();
+        let marking = self.clone();
+        target.connect_motion(move |_, _, _| {
+            marking.mark_insertion(marking.end_of_section(id));
+            gtk::gdk::DragAction::MOVE
+        });
+        let marking = self.clone();
+        target.connect_leave(move |_| marking.mark_insertion(None));
         target.connect_drop(move |_, value, _, _| match parse_drag(value) {
             Some(Dragged::Entry { from, entry }) => {
+                this.mark_insertion(None);
                 this.store.move_entry_to_section(from, id, &entry, None);
                 this.changed();
                 true
@@ -1521,6 +1663,10 @@ impl Watchlist {
         row.set_child(Some(&row_box));
         row.set_activatable(true);
         row.set_tooltip_text(Some(&instrument.full_name()));
+        // Named so the stylesheet can take GTK's drop frame off the symbols:
+        // the line between them says where the drop goes, which is the thing
+        // being asked.
+        row.add_css_class("symbol-row");
 
         self.wire_row_removal(&row, section_id, entry);
         self.wire_row_reorder(&row, section_id, entry);
@@ -1643,6 +1789,7 @@ impl Watchlist {
         while let Some(child) = self.column_header.first_child() {
             self.column_header.remove(&child);
         }
+        self.column_labels.borrow_mut().clear();
         let sort = self.sort.get();
         for column in self.columns.borrow().iter().copied() {
             let arrow = match sort {
@@ -1677,8 +1824,16 @@ impl Watchlist {
             label.set_tooltip_text(Some(&tip));
 
             let click = gtk::GestureClick::new();
+            let from = Rc::new(Cell::new(f64::MIN));
+            let pressed = from.clone();
+            click.connect_pressed(move |_, _, x, _| pressed.set(x));
             let this = self.clone();
-            click.connect_released(move |_, _, _, _| {
+            click.connect_released(move |_, _, x, _| {
+                // A press that travelled was somebody moving the column, or
+                // trying to; it is not a click, whatever it ends up doing.
+                if (x - from.get()).abs() > GRIP_REACH {
+                    return;
+                }
                 let next = Sort::after_click(this.sort.get(), column);
                 store_sort(&this.store, this.active.get(), next);
                 this.rebuild();
@@ -1687,7 +1842,14 @@ impl Watchlist {
 
             // Carried further than a click, the same press moves the column
             // instead of sorting by it: GTK hands the sequence to whichever
-            // of the two the gesture turns out to be.
+            // of the two the gesture turns out to be. Not the symbol, which
+            // is always the first column — a drag of it could only ever have
+            // been undone by the rule that puts it back.
+            if column == Column::Symbol {
+                self.column_header.append(&label);
+                self.column_labels.borrow_mut().push((column, label));
+                continue;
+            }
             let source = gtk::DragSource::new();
             source.set_actions(gtk::gdk::DragAction::MOVE);
             source.connect_prepare(move |_, _, _| {
@@ -1695,15 +1857,57 @@ impl Watchlist {
             });
             // What you are dragging: the title itself, under the pointer,
             // which is the widget we already have rather than a drawing of it.
+            let this = self.clone();
             source.connect_drag_begin(move |source, _| {
+                this.carrying.set(true);
+                this.column_grip.set_visible(false);
+                this.gripped.set(None);
                 let Some(label) = source.widget().and_downcast::<gtk::Label>() else { return };
                 let ghost = gtk::WidgetPaintable::new(Some(&label));
                 source.set_icon(Some(&ghost), label.width() / 2, label.height() / 2);
             });
+            let this = self.clone();
+            source.connect_drag_end(move |_, _, _| this.carrying.set(false));
             label.add_controller(source);
             self.column_header.append(&label);
+            self.column_labels.borrow_mut().push((column, label));
         }
         self.column_marker.set_visible(false);
+        self.column_grip.set_visible(false);
+        self.gripped.set(None);
+        for (column, width) in self.column_widths.borrow().iter() {
+            self.apply_width(*column, *width);
+        }
+    }
+
+    /// Make a column that wide, title and cells together.
+    ///
+    /// The width is asked for rather than counted in characters, which is
+    /// what the columns do until somebody drags one: a request can be
+    /// smaller than the text, and a column dragged narrow is one the reader
+    /// has said they would rather see less of.
+    fn apply_width(&self, column: Column, width: i32) {
+        if column == Column::Symbol {
+            return;
+        }
+        let wide = |label: &gtk::Label| {
+            label.set_width_chars(-1);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_size_request(width, -1);
+        };
+        for (at, label) in self.column_labels.borrow().iter() {
+            if *at == column {
+                wide(label);
+            }
+        }
+        for kind in self.rows.borrow().iter() {
+            let RowKind::Entry { cells, .. } = kind else { continue };
+            for (at, label) in cells {
+                if *at == column {
+                    wide(label);
+                }
+            }
+        }
     }
 
     /// Where a dragged column would land: a short line standing in the gap it
@@ -1725,7 +1929,7 @@ impl Watchlist {
         let mark = marker.clone();
         let at_now = showing.clone();
         target.connect_motion(move |_, x, _| {
-            let at = gap_at(&header, x);
+            let at = gap_at(&header, x).max(1);
             if at_now.get() != Some(at) {
                 at_now.set(Some(at));
                 mark.set_margin_start(gap_x(&header, at));
@@ -1749,12 +1953,166 @@ impl Watchlist {
             at_now.set(None);
             mark.set_visible(false);
             let Ok(ColumnDrag(moving)) = value.get::<ColumnDrag>() else { return false };
-            let at = gap_at(&header, x);
+            let at = gap_at(&header, x).max(1);
             let Some(columns) = dropped(&this.columns.borrow(), moving, at) else { return false };
             this.set_columns(columns);
             true
         });
         self.column_header.add_controller(target);
+    }
+
+    /// Put the insertion line at `y` in the list, or take it away.
+    ///
+    /// Per motion: the same answer moves nothing, which is most of them —
+    /// a row is many pixels tall and the line sits on its edge.
+    fn mark_insertion(&self, y: Option<i32>) {
+        match y {
+            Some(y) => {
+                if self.row_marked.get() == y && self.row_marker.is_visible() {
+                    return;
+                }
+                self.row_marked.set(y);
+                self.row_marker.set_margin_top((y - 1).max(0));
+                self.row_marker.set_visible(true);
+            }
+            None => {
+                self.row_marked.set(-1);
+                self.row_marker.set_visible(false);
+            }
+        }
+    }
+
+    /// Where a symbol dropped on this section's header would go in: after
+    /// its last symbol, or against the header itself when it has none.
+    fn end_of_section(&self, section_id: i64) -> Option<i32> {
+        let rows = self.rows.borrow();
+        let last = rows.iter().enumerate().filter(|(_, kind)| {
+            matches!(kind, RowKind::Entry { section_id: id, .. } if *id == section_id)
+        });
+        let at = last.map(|(at, _)| at).next_back();
+        match at {
+            Some(at) => {
+                let row = self.list.row_at_index(at as i32)?;
+                Some(row.allocation().y() + row.height())
+            }
+            None => {
+                let at = rows.iter().position(
+                    |kind| matches!(kind, RowKind::Header { section_id: id, .. } if *id == section_id),
+                )?;
+                let row = self.list.row_at_index(at as i32)?;
+                Some(row.allocation().y() + row.height())
+            }
+        }
+    }
+
+    /// The boundary under the pointer, shown as the quiet twin of the line
+    /// that says where a dropped column lands.
+    ///
+    /// Per motion: which boundary, if any, and a move only when that is a
+    /// different answer from last time.
+    fn hover_boundary(&self, x: f64) {
+        // A column in flight owns the line; its own mark is the loud one.
+        if self.carrying.get() {
+            return;
+        }
+        let at = boundary_near(&self.column_header, x);
+        if self.gripped.get() == at {
+            return;
+        }
+        self.gripped.set(at);
+        match at {
+            Some(at) => {
+                self.column_grip.set_margin_start(gap_x(&self.column_header, at));
+                self.column_grip.set_visible(true);
+                self.column_header.set_cursor_from_name(Some("col-resize"));
+            }
+            None => {
+                self.column_grip.set_visible(false);
+                self.column_header.set_cursor(None);
+            }
+        }
+    }
+
+    /// What a column is as wide as now: what it was dragged to, or what the
+    /// title is currently given.
+    fn width_now(&self, column: Column) -> i32 {
+        if let Some((_, width)) = self.column_widths.borrow().iter().find(|(c, _)| *c == column) {
+            return *width;
+        }
+        self.column_labels
+            .borrow()
+            .iter()
+            .find(|(c, _)| *c == column)
+            .map(|(_, label)| label.width())
+            .unwrap_or(MIN_WIDTH)
+    }
+
+    fn remember_width(&self, column: Column, width: i32) {
+        let mut widths = self.column_widths.borrow_mut();
+        match widths.iter_mut().find(|(c, _)| *c == column) {
+            Some(held) => held.1 = width,
+            None => widths.push((column, width)),
+        }
+        self.store.set_setting(SETTING_WIDTHS, &widths_to_string(&widths));
+    }
+
+    /// Drag a boundary to make the column on its right wider or narrower.
+    ///
+    /// The symbol column takes up whatever is left, so it is the one that
+    /// gives and takes the room: the other columns keep the widths they were
+    /// given rather than all shuffling when one of them changes.
+    ///
+    /// In the capture phase, so a press on a boundary is a resize before the
+    /// title under it can read it as a drag or a click. A press anywhere
+    /// else is denied here and goes on to the title, which is what keeps the
+    /// three gestures apart.
+    fn wire_column_resize(self: &Rc<Self>) {
+        let motion = gtk::EventControllerMotion::new();
+        let this = self.clone();
+        motion.connect_motion(move |_, x, _| this.hover_boundary(x));
+        let this = self.clone();
+        motion.connect_leave(move |_| this.hover_boundary(f64::MIN));
+        self.column_header.add_controller(motion);
+
+        let drag = gtk::GestureDrag::new();
+        drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let holding: Rc<Cell<Option<(Column, i32, f64)>>> = Rc::new(Cell::new(None));
+
+        let this = self.clone();
+        let held = holding.clone();
+        drag.connect_drag_begin(move |drag, x, _| {
+            let boundary = boundary_near(&this.column_header, x)
+                .and_then(|at| this.columns.borrow().get(at).copied())
+                .filter(|column| *column != Column::Symbol);
+            match boundary {
+                Some(column) => {
+                    held.set(Some((column, this.width_now(column), x)));
+                    drag.set_state(gtk::EventSequenceState::Claimed);
+                }
+                None => {
+                    held.set(None);
+                    drag.set_state(gtk::EventSequenceState::Denied);
+                }
+            }
+        });
+
+        let this = self.clone();
+        let held = holding.clone();
+        drag.connect_drag_update(move |_, moved, _| {
+            let Some((column, start, from)) = held.get() else { return };
+            this.apply_width(column, dragged_width(start, moved));
+            // The line follows the pointer rather than waiting for the
+            // layout that is about to happen behind it.
+            this.column_grip.set_margin_start(((from + moved) as i32 - 1).max(0));
+        });
+
+        let this = self.clone();
+        let held = holding.clone();
+        drag.connect_drag_end(move |_, moved, _| {
+            let Some((column, start, _)) = held.take() else { return };
+            this.remember_width(column, dragged_width(start, moved));
+        });
+        self.column_header.add_controller(drag);
     }
 
     fn cell(&self, column: Column, instrument: &Instrument, quote: Option<Quote>) -> gtk::Label {
@@ -1771,6 +2129,13 @@ impl Watchlist {
         label.add_css_class("caption");
         label.set_xalign(1.0);
         label.set_width_chars(column.width_chars());
+        // A column somebody has dragged to a width keeps it as rows come and
+        // go, so a new row is born the width the rest of its column is.
+        if let Some((_, width)) = self.column_widths.borrow().iter().find(|(c, _)| *c == column) {
+            label.set_width_chars(-1);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_size_request(*width, -1);
+        }
         write_cell(&label, column, quote, instrument.kind);
         label
     }
@@ -1817,13 +2182,41 @@ impl Watchlist {
         source.connect_prepare(move |_, _, _| {
             Some(gtk::gdk::ContentProvider::for_value(&dragged.to_value()))
         });
+        // The row itself under the pointer. Without an icon of its own GTK
+        // draws the payload, and the payload is a section id and a tab.
+        source.connect_drag_begin(move |source, _| {
+            let Some(row) = source.widget() else { return };
+            let ghost = gtk::WidgetPaintable::new(Some(&row));
+            source.set_icon(Some(&ghost), row.width() / 2, row.height() / 2);
+        });
+        let this = self.clone();
+        source.connect_drag_end(move |_, _, _| this.mark_insertion(None));
         row.add_controller(source);
 
         let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+        // A symbol lands in front of the row it is dropped on, so the line
+        // goes on that row's top edge — the place, not the row.
+        let this = self.clone();
+        let marked = row.clone();
+        target.connect_motion(move |_, _, _| {
+            // Where it lands when the list is in its own order is this row's
+            // place. When the list is sorted the row is the sort's to pick,
+            // and all the drop decides is the section — so the line goes at
+            // the end of it rather than promising a place it will not take.
+            let at = match this.sort.get() {
+                Some(_) => this.end_of_section(section_id),
+                None => Some(marked.allocation().y()),
+            };
+            this.mark_insertion(at);
+            gtk::gdk::DragAction::MOVE
+        });
+        let this = self.clone();
+        target.connect_leave(move |_| this.mark_insertion(None));
         let this = self.clone();
         let onto = entry.clone();
         target.connect_drop(move |_, value, _, _| match parse_drag(value) {
             Some(Dragged::Entry { from, entry }) => {
+                this.mark_insertion(None);
                 // A place in a sorted section is the sort's to decide, so a
                 // symbol can only be dropped into a different one.
                 if from == section_id && (entry == onto || this.sort.get().is_some()) {
@@ -2986,6 +3379,54 @@ mod tests {
     }
 
     #[test]
+    fn a_width_read_back_is_one_the_rail_can_use() {
+        use Column::{Change, ChangePct, Last, Symbol};
+        let widths = parse_widths(Some("last:96,change_pct:72"));
+        assert_eq!(widths, vec![(Last, 96), (ChangePct, 72)]);
+        assert_eq!(widths_to_string(&widths), "last:96,change_pct:72");
+
+        // Nonsense of every kind falls out and leaves the rest standing,
+        // because a width nobody can read is a column at its own size, not
+        // a rail that refuses to open.
+        assert_eq!(parse_widths(None), vec![]);
+        assert_eq!(parse_widths(Some("")), vec![]);
+        assert_eq!(parse_widths(Some("last")), vec![]);
+        assert_eq!(parse_widths(Some("last:")), vec![]);
+        assert_eq!(parse_widths(Some("last:wide")), vec![]);
+        assert_eq!(parse_widths(Some("volume:80")), vec![]);
+        assert_eq!(parse_widths(Some("last:0")), vec![], "zero is not a column");
+        assert_eq!(parse_widths(Some("last:-40")), vec![], "nor is a negative one");
+        assert_eq!(parse_widths(Some("last:99999")), vec![], "nor one wider than the rail");
+        assert_eq!(parse_widths(Some("symbol:90")), vec![], "the symbol takes what is left");
+        assert_eq!(parse_widths(Some("last:96,last:72")), vec![(Last, 96)], "the first wins");
+        assert_eq!(
+            parse_widths(Some("rubbish,change:60,last:bad")),
+            vec![(Change, 60)],
+            "what can be read is kept"
+        );
+        // A width for a column the rail is not showing is simply not used.
+        assert!(!parse_columns(Some("symbol,last")).contains(&Change));
+        assert_eq!(parse_widths(Some("change:60")), vec![(Change, 60)]);
+        assert_eq!(parse_columns(Some("symbol,last"))[0], Symbol);
+    }
+
+    #[test]
+    fn a_boundary_carried_left_makes_its_column_wider() {
+        // The columns are packed against the right, so the boundary is the
+        // column's left edge: carrying it left gives the column the room.
+        assert_eq!(dragged_width(90, -20.0), 110);
+        assert_eq!(dragged_width(90, 20.0), 70);
+        assert_eq!(dragged_width(90, 0.0), 90);
+        // And it stops at both ends rather than vanishing or eating the rail.
+        assert_eq!(dragged_width(90, 500.0), MIN_WIDTH);
+        assert_eq!(dragged_width(90, -500.0), MAX_WIDTH);
+        // Whatever it is dragged to can be read back as what it was.
+        let dragged = dragged_width(90, -14.4);
+        assert_eq!(parse_widths(Some(&widths_to_string(&[(Column::Last, dragged)]))),
+                   vec![(Column::Last, dragged)]);
+    }
+
+    #[test]
     fn a_column_dropped_in_a_gap_lands_there() {
         use Column::{Change, ChangePct, Last, Symbol};
         let shown = [Symbol, Last, ChangePct];
@@ -3000,12 +3441,21 @@ mod tests {
         assert_eq!(dropped(&shown, Last, 2), None);
         // A column the rail is not showing is not a column to move.
         assert_eq!(dropped(&shown, Change, 1), None);
-        // The far ends, which is where a pointer that overshoots lands.
-        assert_eq!(dropped(&shown, ChangePct, 0), Some(vec![ChangePct, Symbol, Last]));
-        assert_eq!(dropped(&shown, Symbol, 3), Some(vec![Last, ChangePct, Symbol]));
+        // The far end, which is where a pointer that overshoots lands.
+        assert_eq!(dropped(&shown, Last, 3), Some(vec![Symbol, ChangePct, Last]));
         // Symbol is first whatever a drop says, which is the rule the rail
         // has always had and the reason the drop goes through `parse_columns`.
         assert_eq!(parse_columns(Some(&columns_to_string(&[Last, ChangePct, Symbol])))[0], Symbol);
+        // It does not move, and nothing lands in front of it: a drop over
+        // on that side takes the first place that is really a place.
+        assert_eq!(dropped(&shown, Symbol, 2), None, "the symbol column stays put");
+        assert_eq!(dropped(&shown, Symbol, 0), None);
+        assert_eq!(
+            dropped(&shown, ChangePct, 0),
+            Some(vec![Symbol, ChangePct, Last]),
+            "dropped to the left of the symbol, it lands just after it"
+        );
+        assert_eq!(dropped(&shown, Last, 0), None, "which is where it already was");
     }
 
     #[test]
