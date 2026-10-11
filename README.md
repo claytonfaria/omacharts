@@ -39,11 +39,9 @@ Fast, beautiful charting software for [Omarchy](https://omarchy.org).
 - **Indicators.** Moving averages, VWAP with bands, volume, volume profile,
   RSI, ATR and stochastic, each in its own resizable strip. More coming.
 - **Drawings.** Trendlines, levels, arrows, zig-zags, boxes, circles and text,
-  each one key away (`Alt+L`, `H`, `A`, `Z`, `R`, `C`, `T`), with nine
-  configurations per kind on `Alt+1` to `Alt+9`. Those are roles your theme
-  fills rather than fixed colours, held clear of the candles, so a drawing
-  reads on any theme. Any figure takes a label, bold and italic included, and
-  what you draw is on every chart of that symbol.
+  a keystroke each. Their colours are roles your theme fills, held clear of
+  the candles, so a drawing reads on any theme. Figures take labels, and what
+  you draw is on every chart of that symbol.
   [See how it works](https://www.youtube.com/watch?v=wwMnxI0watk).
 - **Omarchy plugin.** Your watchlist in the bar, with sparklines, live, still
   there after the window closes. It installs itself the first time you run
@@ -180,18 +178,7 @@ omacharts skill install
 See `omacharts skill --help`, or
 [doc/cli.md](doc/cli.md#teaching-an-agent-about-this-app).
 
-## Roadmap
-
-Rough order, and nothing here is a promise.
-
-- [x] **Beautiful drawings.** Trendlines, levels and notes that stay where
-      you put them, and look like they belong on the chart rather than on top
-      of it.
-- [ ] **More data feeds.** Yahoo is one provider behind one interface. Others
-      can sit behind the same one, including the paid ones with real-time
-      prices.
-- [ ] **More indicators.** MACD and Bollinger bands are the obvious gaps.
-- [ ] ...
+## Contributing
 
 Pull requests are welcome.
 

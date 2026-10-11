@@ -191,6 +191,124 @@ The first keeps a command in its own process; the second is for when the run
 needs a window of its own. Two separate sessions have changed a live chart by
 getting this half right.
 
+### And its own compositor, when the run needs to be driven
+
+A window that has to be typed into, clicked on and photographed needs a
+third thing nobody has: a screen. This desktop has one monitor and somebody
+is using it, so a test window either takes it or sits unfocused, and an
+unfocused GTK4 window is one synthetic input never reaches. An agent gave
+up on verifying a drawing fix for exactly that reason, and another worked
+around it by patching the app to call a button's own handler from a timer —
+which proves the handler runs, not that clicking the button does.
+
+`bin/headless-window` is the answer: a second compositor with no monitor
+behind it, on its own bus and its own profile, which an agent owns
+completely.
+
+```sh
+eval "$(bin/headless-window start)"
+bin/headless-window app
+bin/headless-window key ctrl+b
+bin/headless-window click 753 24
+bin/headless-window drag 900 400 400 400
+bin/headless-window shot /tmp/after.png
+bin/headless-window stop
+```
+
+It is sway on its headless backend, because the headless backend is the
+part Hyprland does not have: aquamarine builds its allocator from a
+backend's DRM descriptor, the headless one has none, and a Hyprland with
+nothing else available refuses to start at all. Nested Hyprland works only
+inside another Wayland compositor, which means a window on the screen this
+exists to stay off.
+
+Native Wayland throughout, which is the other half of the point: the output
+is 2560×1440 at scale 2, so the window is drawn at HiDPI and a screenshot
+is what a user would actually see. `GDK_BACKEND=x11` gets no scaling under
+XWayland, which is how a test window came to look broken enough that
+somebody asked whether the app was.
+
+What it needs from the machine is `sway`; `wtype`, `grim`, `dbus-daemon`
+and `python3` are already here. No root, no `uinput`, no seat of its own,
+and nothing written outside its own directory under `$XDG_RUNTIME_DIR`.
+The limits — coordinates are layout coordinates, the first chord a fresh
+window is sent is swallowed and has to be sent twice, and `swaymsg`'s own
+cursor command cannot drag — are in the review skill's section on driving
+the window, which is where an agent is when it needs them.
+
+## A fresh target directory is a cold build, and cold here means minutes
+
+The dependency graph includes the GTK bindings, so building this workspace
+from nothing compiles over a thousand crates. A warm `target/` in the repo
+makes a local change feel instant — one crate recompiled and a relink — and
+that is misleading: point `CARGO_TARGET_DIR` somewhere new and the same
+change takes minutes instead.
+
+Which matters because concurrent agents are each given their own target
+directory on purpose. Two builds of different branches both write
+`target/debug/omacharts`, so sharing one directory means overwriting each
+other's binary mid-run and reporting results from a mix of the two. The
+directories have to stay separate; what should be shared is the compilation
+cache underneath them:
+
+```sh
+sudo pacman -S --needed sccache
+```
+
+```toml
+# ~/.cargo/config.toml
+[build]
+rustc-wrapper = "sccache"
+```
+
+Then the first build to need a crate pays for it and every other target
+directory gets it from the cache, so a fresh directory stops meaning a cold
+build. `sccache --show-stats` reports the hit rate. Do not add this to the
+repo's own `.cargo/config.toml` — it is a property of the machine doing the
+building, not of the project, and CI has no cache to hit.
+
+Before blaming a PR for a slow review, check which of the two kinds of build
+it was.
+
+## A regression is measured, not noticed
+
+Three things are what this app is for: being quick to have a chart on screen,
+being quick to draw one, and answering a hand or a keyboard without a pause.
+All three are measured, and the pull request that breaks one says so rather
+than somebody noticing a month later that the app feels slow.
+
+```sh
+cargo run --release --example perf          # the table, for reading
+bin/perf-compare                            # the table twice, against main
+```
+
+`examples/perf.rs` is the scenarios: a startup budget, frame costs at four
+screenfuls across one and four charts, and the latency of a pointer motion, a
+character typed into the search box, a tick arriving and a command running.
+Offline and deterministic, every row — a synthetic series, a scratch `HOME`,
+no socket. `frame_bench` and `stream_bench` stay what they were: the same
+scenes, drawn through the same `Scene`, printed as a mean for somebody reading
+them.
+
+`.github/workflows/perf.yml` runs the comparison on every pull request, in a job
+of its own so the build and the tests are not behind it, and puts the table in
+the job summary rather than in a comment — which is why it needs no write token
+and no secret. What it
+fails on is the allocation counts, which are exact and the same on every
+machine. The clock is reported and only fails at a doubling, because a GitHub
+runner is a slice of a shared machine and below that a regression and a busy
+neighbour are the same number. `bin/perf-compare`'s header has the whole of the
+reasoning; read it before changing a threshold.
+
+Two things follow for anyone adding to the harness. It must stay inside
+`examples/perf.rs` and `src/ui/chart/bench.rs`, because the comparison copies
+those two files onto the older revision — a harness that reached into a third
+file could not be grafted, and the job would stop comparing and start reporting.
+And a scenario has to be idempotent: its allocation counts are taken from a
+single run after a warm-up, and the two passes of a side have to agree on them
+to the byte. One that leaves something behind measures a different thing the
+second time, and the comparison says so rather than picking a number.
+
 ## Verifying parity
 
 Before calling a feature done:
