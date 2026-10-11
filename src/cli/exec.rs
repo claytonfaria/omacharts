@@ -433,10 +433,8 @@ fn watchlist_sort(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<
     let (id, name) = find_list(store, required(m, "LIST")?)?;
     let Some(wanted) = arg(m, "COLUMN") else {
         let sort = stored_sort(store, id).map(Sort::key);
-        return match as_json {
-            true => Ok(format!("{}\n", json!({"id": id, "name": name, "sort": sort}))),
-            false => Ok(format!("{}\n", sort.unwrap_or_else(|| "none".to_string()))),
-        };
+        let text = sort.clone().unwrap_or_else(|| "none".to_string());
+        return said(as_json, json!({"id": id, "name": name, "sort": sort}), text);
     };
     // `none` is no column, which is the list's own order; the parser has
     // already refused anything that is neither.
