@@ -510,6 +510,15 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    band is as short as it can be without the line crowding what is above. */
 .rail-header { margin-top: 30px; min-height: 6px; }
 
+/* Where a column being dragged would land: a line in the gap it would take,
+   in the accent colour the rest of the app marks a choice with. */
+.column-drop {
+  min-width: 2px;
+  margin: 1px 2px;
+  border-radius: 1px;
+  background: @accent_bg_color;
+}
+
 /* The watchlist's name, in the band the corner controls already reserved.
    Text with a chevron rather than a button: it names what you are looking at,
    and brightens rather than lighting up a background under the pointer, so the

@@ -242,6 +242,70 @@ enum Rank {
     Price(Option<f64>),
 }
 
+/// Which gap between the column titles `x` falls in, counted in columns.
+///
+/// The marker is a child of the header too, and is not a gap of its own.
+fn gap_at(header: &gtk::Box, marker: &gtk::Box, x: f64) -> usize {
+    let mut at = 0;
+    let mut child = header.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if widget == *marker.upcast_ref::<gtk::Widget>() {
+            continue;
+        }
+        let middle = widget.allocation().x() as f64 + widget.width() as f64 / 2.0;
+        if x < middle {
+            break;
+        }
+        at += 1;
+    }
+    at
+}
+
+/// Put the marker in the `at`th gap, and leave it alone if it is already
+/// there — a drag sends motion far more often than it crosses a title.
+fn move_marker(header: &gtk::Box, marker: &gtk::Box, at: usize) {
+    if marker.is_visible() && gap_at(header, marker, marker_middle(marker)) == at {
+        return;
+    }
+    let mut after: Option<gtk::Widget> = None;
+    let mut seen = 0;
+    let mut child = header.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if widget == *marker.upcast_ref::<gtk::Widget>() {
+            continue;
+        }
+        if seen == at {
+            break;
+        }
+        seen += 1;
+        after = Some(widget);
+    }
+    header.reorder_child_after(marker, after.as_ref());
+    marker.set_visible(true);
+}
+
+fn marker_middle(marker: &gtk::Box) -> f64 {
+    marker.allocation().x() as f64 + marker.width() as f64 / 2.0
+}
+
+/// The columns after `moving` is dropped in the `at`th gap, or nothing when
+/// that is the gap it already sits in.
+fn dropped(columns: &[Column], moving: Column, at: usize) -> Option<Vec<Column>> {
+    let from = columns.iter().position(|c| *c == moving)?;
+    // The gaps are counted among the columns as they stand, so a gap after
+    // the one being moved loses a place once it is taken out.
+    let to = if at > from { at - 1 } else { at };
+    if to == from {
+        return None;
+    }
+    let mut columns = columns.to_vec();
+    let column = columns.remove(from);
+    columns.insert(to.min(columns.len()), column);
+    Some(columns)
+}
+
 /// Where a watchlist's sort is kept. Per list, because a list of movers wants
 /// sorting by change and a list of holdings wants the order it was built in.
 fn sort_setting(watchlist: i64) -> String {
@@ -334,6 +398,8 @@ pub struct Watchlist {
     columns: RefCell<Vec<Column>>,
     /// The column titles over the rows, which are also how they are sorted.
     column_header: gtk::Box,
+    /// The line that says where a column being dragged would land.
+    column_marker: gtk::Box,
     /// How the list on screen is sorted, read from the store on every rebuild.
     sort: Cell<Option<Sort>>,
     /// Set while we are selecting a row ourselves, so rebuilding does not
@@ -445,6 +511,10 @@ impl Watchlist {
         // The column titles, lined up over the cells: a row's box starts 26px
         // from the rail's edge (see the switcher above) and ends 24px from the
         // other, 6px of Adwaita's row margin and 8 of padding past its own 10.
+        let column_marker = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        column_marker.add_css_class("column-drop");
+        column_marker.set_visible(false);
+
         let column_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         column_header.set_margin_start(26);
         column_header.set_margin_end(24);
@@ -481,6 +551,7 @@ impl Watchlist {
             rows: RefCell::new(Vec::new()),
             columns: RefCell::new(columns),
             column_header: column_header.clone(),
+            column_marker: column_marker.clone(),
             sort: Cell::new(None),
             quiet: Cell::new(false),
             link: link.clone(),
@@ -521,6 +592,7 @@ impl Watchlist {
         watchlist.wire_keys();
         watchlist.wire_click_to_focus();
         watchlist.wire_switcher();
+        watchlist.wire_column_drop();
         watchlist.rebuild();
         watchlist
     }
@@ -1598,8 +1670,68 @@ impl Watchlist {
                 this.rebuild();
             });
             label.add_controller(click);
+
+            // Carried further than a click, the same press moves the column
+            // instead of sorting by it: GTK hands the sequence to whichever
+            // of the two the gesture turns out to be.
+            let source = gtk::DragSource::new();
+            source.set_actions(gtk::gdk::DragAction::MOVE);
+            let key = column.key();
+            source.connect_prepare(move |_, _, _| {
+                Some(gtk::gdk::ContentProvider::for_value(&key.to_value()))
+            });
+            // What you are dragging: the title itself, under the pointer,
+            // which is the widget we already have rather than a drawing of it.
+            source.connect_drag_begin(move |source, _| {
+                let Some(label) = source.widget().and_downcast::<gtk::Label>() else { return };
+                let ghost = gtk::WidgetPaintable::new(Some(&label));
+                source.set_icon(Some(&ghost), label.width() / 2, label.height() / 2);
+            });
+            label.add_controller(source);
             self.column_header.append(&label);
         }
+        // The marker lives with the titles and is cleared away with them, so
+        // it goes back after each rebuild rather than being wired again.
+        self.column_marker.set_visible(false);
+        self.column_header.append(&self.column_marker);
+    }
+
+    /// Where a dragged column would land: a line in the gap it would go into,
+    /// which moves between the titles as the pointer does.
+    ///
+    /// The marker is a child of the header like the titles are, so the gap
+    /// opens where the column will actually be and nothing is drawn by hand.
+    /// A motion works out which gap the pointer is in and moves the marker
+    /// there if it is somewhere else; that is the whole of the per-motion
+    /// work.
+    fn wire_column_drop(self: &Rc<Self>) {
+        let marker = self.column_marker.clone();
+        let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+
+        let header = self.column_header.clone();
+        let mark = marker.clone();
+        target.connect_motion(move |_, x, _| {
+            let at = gap_at(&header, &mark, x);
+            move_marker(&header, &mark, at);
+            gtk::gdk::DragAction::MOVE
+        });
+
+        let mark = marker.clone();
+        target.connect_leave(move |_| mark.set_visible(false));
+
+        let this = self.clone();
+        let header = self.column_header.clone();
+        let mark = marker.clone();
+        target.connect_drop(move |_, value, x, _| {
+            mark.set_visible(false);
+            let Ok(key) = value.get::<String>() else { return false };
+            let Some(moving) = Column::from_key(&key) else { return false };
+            let at = gap_at(&header, &mark, x);
+            let Some(columns) = dropped(&this.columns.borrow(), moving, at) else { return false };
+            this.set_columns(columns);
+            true
+        });
+        self.column_header.add_controller(target);
     }
 
     fn cell(&self, column: Column, instrument: &Instrument, quote: Option<Quote>) -> gtk::Label {
@@ -2828,6 +2960,29 @@ mod tests {
         assert_eq!(parse_columns(None), Column::DEFAULT.to_vec());
         assert_eq!(parse_columns(Some("")), Column::DEFAULT.to_vec());
         assert_eq!(parse_columns(Some("nonsense,rubbish")), Column::DEFAULT.to_vec());
+    }
+
+    #[test]
+    fn a_column_dropped_in_a_gap_lands_there() {
+        use Column::{Change, ChangePct, Last, Symbol};
+        let shown = [Symbol, Last, ChangePct];
+        // Carried right, past the column after it: the gap beyond Chg % is
+        // the third, and Last ends up after it.
+        assert_eq!(dropped(&shown, Last, 3), Some(vec![Symbol, ChangePct, Last]));
+        // And back again.
+        assert_eq!(dropped(&[Symbol, ChangePct, Last], Last, 1), Some(vec![Symbol, Last, ChangePct]));
+        // Dropped in the gap it came from, either side of itself: nothing
+        // moves, so the drop is refused rather than rebuilding the rail.
+        assert_eq!(dropped(&shown, Last, 1), None);
+        assert_eq!(dropped(&shown, Last, 2), None);
+        // A column the rail is not showing is not a column to move.
+        assert_eq!(dropped(&shown, Change, 1), None);
+        // The far ends, which is where a pointer that overshoots lands.
+        assert_eq!(dropped(&shown, ChangePct, 0), Some(vec![ChangePct, Symbol, Last]));
+        assert_eq!(dropped(&shown, Symbol, 3), Some(vec![Last, ChangePct, Symbol]));
+        // Symbol is first whatever a drop says, which is the rule the rail
+        // has always had and the reason the drop goes through `parse_columns`.
+        assert_eq!(parse_columns(Some(&columns_to_string(&[Last, ChangePct, Symbol])))[0], Symbol);
     }
 
     #[test]
