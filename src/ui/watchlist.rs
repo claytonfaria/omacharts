@@ -337,8 +337,30 @@ fn gap_x(header: &gtk::Box, at: usize) -> i32 {
     (last - 2).max(0)
 }
 
+/// Halfway between two rows, measured from their middles rather than from
+/// the edges between them.
+///
+/// The edges are the layout's business — padding, margins and a row's own
+/// box all land on them — and a line halfway between two of those sat six
+/// pixels above where the eye says the middle is. Halfway between the two
+/// rows' centres is the middle of the two symbols, which is what the line
+/// is claiming to be.
+fn between(above: &gtk::ListBoxRow, below: &gtk::ListBoxRow) -> i32 {
+    let middle = |row: &gtk::ListBoxRow| row.allocation().y() + row.height() / 2;
+    (middle(above) + middle(below)) / 2
+}
+
 /// How far either side of a boundary counts as grabbing it.
-const GRIP_REACH: f64 = 4.0;
+///
+/// Ten rather than the four this started as: four is the boundary between
+/// two allocations, which is a place the layout knows about and the reader
+/// does not. A handle has to be found with a pointer before it can be
+/// dragged with one, and seven pixels of invisible target is a handle that
+/// is not there at all.
+const GRIP_REACH: f64 = 10.0;
+
+/// How far a press may travel and still be a click rather than a drag.
+const CLICK_SLOP: f64 = 4.0;
 
 /// The boundary `x` is near enough to drag, if it is near one.
 ///
@@ -476,8 +498,13 @@ pub struct Watchlist {
     /// Where that line is now, so motion over one row costs nothing after
     /// the first event.
     row_marked: Cell<i32>,
-    /// The same line, quieter, on the boundary the pointer could drag.
-    column_grip: gtk::Box,
+    /// The overlay the marks are drawn on, over the titles.
+    column_overlay: gtk::Overlay,
+    /// One quiet line per boundary, shown together while the pointer is in
+    /// the heading row so the handles can be seen rather than hunted for.
+    column_grips: RefCell<Vec<gtk::Box>>,
+    /// Whether those lines are up, and which one the pointer is in reach of.
+    grips_shown: Cell<bool>,
     /// The title widgets, so a width can be applied without a rebuild.
     column_labels: RefCell<Vec<(Column, gtk::Label)>>,
     /// What each column has been dragged to, for the ones that have been.
@@ -638,23 +665,11 @@ impl Watchlist {
         column_marker.set_can_target(false);
         column_marker.set_visible(false);
 
-        // The same mark in its quiet state: same length, same width, same
-        // place, so the boundary you can drag and the gap a column will land
-        // in are plainly one idea.
-        let column_grip = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        column_grip.add_css_class("column-grip");
-        column_grip.set_size_request(2, 11);
-        column_grip.set_halign(gtk::Align::Start);
-        column_grip.set_valign(gtk::Align::Center);
-        column_grip.set_can_target(false);
-        column_grip.set_visible(false);
-
         // The margins belong to the overlay, so a title's own x is the one
         // the line is placed at.
         let columns_over_rows = gtk::Overlay::new();
         columns_over_rows.set_child(Some(&column_header));
         columns_over_rows.add_overlay(&column_marker);
-        columns_over_rows.add_overlay(&column_grip);
         columns_over_rows.set_margin_start(26);
         columns_over_rows.set_margin_end(24);
         columns_over_rows.set_margin_top(4);
@@ -692,7 +707,9 @@ impl Watchlist {
             columns: RefCell::new(columns),
             column_header: column_header.clone(),
             column_marker: column_marker.clone(),
-            column_grip: column_grip.clone(),
+            column_overlay: columns_over_rows.clone(),
+            column_grips: RefCell::new(Vec::new()),
+            grips_shown: Cell::new(false),
             row_marker: row_marker.clone(),
             row_marked: Cell::new(-1),
             column_labels: RefCell::new(Vec::new()),
@@ -1545,15 +1562,39 @@ impl Watchlist {
         // stops on one without loading anything, and ← → Enter fold it.
         row.set_selectable(false);
         row.set_activatable(false);
+        // Named like the symbols for the same reason: the line says where
+        // the drop lands, so the frame GTK would draw here is noise.
+        row.add_css_class("section-row");
 
         // Dropping a symbol on a header puts it in that section, at the end.
         // Without this there is no way to move something into a collapsed or
         // empty section. Dropping a section on one puts it beside that section.
         let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
         let this = self.clone();
+        target.set_preload(true);
         let marking = self.clone();
-        target.connect_motion(move |_, _, _| {
-            marking.mark_insertion(marking.end_of_section(id));
+        target.connect_motion(move |target, _, _| {
+            let at = match target.value().as_ref().and_then(parse_drag) {
+                // Beside this section, on the side it is coming from.
+                Some(Dragged::Section(moving)) => {
+                    let order: Vec<i64> = marking
+                        .rows
+                        .borrow()
+                        .iter()
+                        .filter_map(|kind| match kind {
+                            RowKind::Header { section_id, .. } => Some(*section_id),
+                            RowKind::Entry { .. } => None,
+                        })
+                        .collect();
+                    match header_drop_side(&order, moving, id) {
+                        Beside::Before => marking.gap_above_section(id),
+                        Beside::After => marking.end_of_section(id),
+                    }
+                }
+                // A symbol dropped on a header joins the section at its end.
+                _ => marking.end_of_section(id),
+            };
+            marking.mark_insertion(at);
             gtk::gdk::DragAction::MOVE
         });
         let marking = self.clone();
@@ -1831,7 +1872,7 @@ impl Watchlist {
             click.connect_released(move |_, _, x, _| {
                 // A press that travelled was somebody moving the column, or
                 // trying to; it is not a click, whatever it ends up doing.
-                if (x - from.get()).abs() > GRIP_REACH {
+                if (x - from.get()).abs() > CLICK_SLOP {
                     return;
                 }
                 let next = Sort::after_click(this.sort.get(), column);
@@ -1860,8 +1901,7 @@ impl Watchlist {
             let this = self.clone();
             source.connect_drag_begin(move |source, _| {
                 this.carrying.set(true);
-                this.column_grip.set_visible(false);
-                this.gripped.set(None);
+                this.leave_boundaries();
                 let Some(label) = source.widget().and_downcast::<gtk::Label>() else { return };
                 let ghost = gtk::WidgetPaintable::new(Some(&label));
                 source.set_icon(Some(&ghost), label.width() / 2, label.height() / 2);
@@ -1873,7 +1913,25 @@ impl Watchlist {
             self.column_labels.borrow_mut().push((column, label));
         }
         self.column_marker.set_visible(false);
-        self.column_grip.set_visible(false);
+        // A line for every boundary, which is every column but the first:
+        // they come up together when the pointer is in the row, so the
+        // handles are visible rather than found by accident.
+        for grip in self.column_grips.borrow_mut().drain(..) {
+            self.column_overlay.remove_overlay(&grip);
+        }
+        let boundaries = self.columns.borrow().len().saturating_sub(1);
+        for _ in 0..boundaries {
+            let grip = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            grip.add_css_class("column-grip");
+            grip.set_size_request(2, 11);
+            grip.set_halign(gtk::Align::Start);
+            grip.set_valign(gtk::Align::Center);
+            grip.set_can_target(false);
+            grip.set_visible(false);
+            self.column_overlay.add_overlay(&grip);
+            self.column_grips.borrow_mut().push(grip);
+        }
+        self.grips_shown.set(false);
         self.gripped.set(None);
         for (column, width) in self.column_widths.borrow().iter() {
             self.apply_width(*column, *width);
@@ -1961,6 +2019,31 @@ impl Watchlist {
         self.column_header.add_controller(target);
     }
 
+    /// The middle of the gap above the row at `at`, which is where a symbol
+    /// dropped on that row goes in.
+    ///
+    /// Between the two rows rather than on one of their edges: the rows
+    /// carry a margin, so their edges are a few pixels apart and a line on
+    /// either of them reads as belonging to that row rather than to the
+    /// space between.
+    fn gap_above(&self, at: i32) -> Option<i32> {
+        let row = self.list.row_at_index(at)?;
+        match at.checked_sub(1).and_then(|above| self.list.row_at_index(above)) {
+            Some(above) => Some(between(&above, &row)),
+            // Nothing above it: the top of the list is the gap.
+            None => Some(row.allocation().y()),
+        }
+    }
+
+    /// The middle of the gap below the row at `at`.
+    fn gap_below(&self, at: i32) -> Option<i32> {
+        let row = self.list.row_at_index(at)?;
+        match self.list.row_at_index(at + 1) {
+            Some(below) => Some(between(&row, &below)),
+            None => Some(row.allocation().y() + row.height()),
+        }
+    }
+
     /// Put the insertion line at `y` in the list, or take it away.
     ///
     /// Per motion: the same answer moves nothing, which is most of them —
@@ -1990,18 +2073,44 @@ impl Watchlist {
             matches!(kind, RowKind::Entry { section_id: id, .. } if *id == section_id)
         });
         let at = last.map(|(at, _)| at).next_back();
-        match at {
-            Some(at) => {
-                let row = self.list.row_at_index(at as i32)?;
-                Some(row.allocation().y() + row.height())
-            }
-            None => {
-                let at = rows.iter().position(
-                    |kind| matches!(kind, RowKind::Header { section_id: id, .. } if *id == section_id),
-                )?;
-                let row = self.list.row_at_index(at as i32)?;
-                Some(row.allocation().y() + row.height())
-            }
+        let at = match at {
+            Some(at) => at,
+            None => rows.iter().position(
+                |kind| matches!(kind, RowKind::Header { section_id: id, .. } if *id == section_id),
+            )?,
+        };
+        drop(rows);
+        self.gap_below(at as i32)
+    }
+
+    /// The middle of the gap above a section's header, where a section
+    /// dropped in front of it would go.
+    fn gap_above_section(&self, section_id: i64) -> Option<i32> {
+        let at = self.rows.borrow().iter().position(
+            |kind| matches!(kind, RowKind::Header { section_id: id, .. } if *id == section_id),
+        )?;
+        self.gap_above(at as i32)
+    }
+
+    /// Where a section dropped on this one's symbols would go: a section
+    /// cannot sit among another's rows, so it goes to the end of it the
+    /// pointer is nearer.
+    fn nearer_end(&self, section_id: i64, row: i32) -> Option<i32> {
+        let rows = self.rows.borrow();
+        let mine: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, kind)| {
+                matches!(kind, RowKind::Entry { section_id: id, .. } if *id == section_id)
+            })
+            .map(|(at, _)| at)
+            .collect();
+        let at = mine.iter().position(|at| *at == row as usize)?;
+        let first = mine.len();
+        drop(rows);
+        match at * 2 < first {
+            true => self.gap_above_section(section_id),
+            false => self.end_of_section(section_id),
         }
     }
 
@@ -2015,22 +2124,41 @@ impl Watchlist {
         if self.carrying.get() {
             return;
         }
+        let grips = self.column_grips.borrow();
+        if !self.grips_shown.get() {
+            self.grips_shown.set(true);
+            for (at, grip) in grips.iter().enumerate() {
+                grip.set_margin_start(gap_x(&self.column_header, at + 1));
+                grip.set_visible(true);
+            }
+        }
         let at = boundary_near(&self.column_header, x);
         if self.gripped.get() == at {
             return;
         }
+        // Only the two that change: the one that was lit and the one that is.
+        if let Some(was) = self.gripped.get().and_then(|was| grips.get(was - 1)) {
+            was.remove_css_class("column-grip-on");
+        }
         self.gripped.set(at);
-        match at {
-            Some(at) => {
-                self.column_grip.set_margin_start(gap_x(&self.column_header, at));
-                self.column_grip.set_visible(true);
+        match at.and_then(|at| grips.get(at - 1)) {
+            Some(now) => {
+                now.add_css_class("column-grip-on");
                 self.column_header.set_cursor_from_name(Some("col-resize"));
             }
-            None => {
-                self.column_grip.set_visible(false);
-                self.column_header.set_cursor(None);
-            }
+            None => self.column_header.set_cursor(None),
         }
+    }
+
+    /// Take the lines away: the pointer has left the heading row.
+    fn leave_boundaries(&self) {
+        self.grips_shown.set(false);
+        self.gripped.set(None);
+        for grip in self.column_grips.borrow().iter() {
+            grip.remove_css_class("column-grip-on");
+            grip.set_visible(false);
+        }
+        self.column_header.set_cursor(None);
     }
 
     /// What a column is as wide as now: what it was dragged to, or what the
@@ -2071,7 +2199,7 @@ impl Watchlist {
         let this = self.clone();
         motion.connect_motion(move |_, x, _| this.hover_boundary(x));
         let this = self.clone();
-        motion.connect_leave(move |_| this.hover_boundary(f64::MIN));
+        motion.connect_leave(move |_| this.leave_boundaries());
         self.column_header.add_controller(motion);
 
         let drag = gtk::GestureDrag::new();
@@ -2103,7 +2231,11 @@ impl Watchlist {
             this.apply_width(column, dragged_width(start, moved));
             // The line follows the pointer rather than waiting for the
             // layout that is about to happen behind it.
-            this.column_grip.set_margin_start(((from + moved) as i32 - 1).max(0));
+            if let Some(grip) = this.gripped.get().and_then(|at| {
+                this.column_grips.borrow().get(at - 1).cloned()
+            }) {
+                grip.set_margin_start(((from + moved) as i32 - 1).max(0));
+            }
         });
 
         let this = self.clone();
@@ -2196,16 +2328,25 @@ impl Watchlist {
         let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
         // A symbol lands in front of the row it is dropped on, so the line
         // goes on that row's top edge — the place, not the row.
+        // Read the payload while it is over us rather than only on the drop,
+        // so the line can say where this particular thing would land.
+        target.set_preload(true);
         let this = self.clone();
         let marked = row.clone();
-        target.connect_motion(move |_, _, _| {
-            // Where it lands when the list is in its own order is this row's
-            // place. When the list is sorted the row is the sort's to pick,
-            // and all the drop decides is the section — so the line goes at
-            // the end of it rather than promising a place it will not take.
-            let at = match this.sort.get() {
-                Some(_) => this.end_of_section(section_id),
-                None => Some(marked.allocation().y()),
+        target.connect_motion(move |target, _, _| {
+            let dragged = target.value().as_ref().and_then(parse_drag);
+            let at = match dragged {
+                // A section cannot sit among another's symbols.
+                Some(Dragged::Section(_)) => this.nearer_end(section_id, marked.index()),
+                // Where it lands when the list is in its own order is this
+                // row's place. When the list is sorted the row is the sort's
+                // to pick and all the drop decides is the section, so the
+                // line goes at the end of it rather than promising a place
+                // it will not take.
+                _ => match this.sort.get() {
+                    Some(_) => this.end_of_section(section_id),
+                    None => this.gap_above(marked.index()),
+                },
             };
             this.mark_insertion(at);
             gtk::gdk::DragAction::MOVE

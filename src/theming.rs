@@ -518,12 +518,15 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    quieter, because it is the same thing not yet happening. */
 .column-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.55); }
 .column-grip { border-radius: 1px; background: alpha(@window_fg_color, 0.25); }
+/* The one the pointer could actually grab, in the weight the drop mark has. */
+.column-grip-on { background: alpha(@window_fg_color, 0.55); }
 
 /* And lying down, between the symbols, for the same reason: a line where
    the dragged one will be inserted says more than a frame round whichever
    row the pointer happens to be over, so the rows lose the frame. */
 .row-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.55); }
-.symbol-row:drop(active) {
+.symbol-row:drop(active),
+.section-row:drop(active) {
   outline: none;
   box-shadow: none;
   background: none;
@@ -754,6 +757,7 @@ mod tests {
         // The headings carry the drop tick alone; a frame as well is noise.
         assert!(css.contains(".column-headings:drop(active)"));
         assert!(css.contains(".symbol-row:drop(active)"));
+        assert!(css.contains(".section-row:drop(active)"));
     }
 
     #[test]
