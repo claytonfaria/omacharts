@@ -516,19 +516,27 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    at the dimming Adwaita gives a `.dim-label` — so the mark belongs to the
    row rather than sitting on top of it. The hover one is the same grey,
    quieter, because it is the same thing not yet happening. */
-/* Three weights of the same grey, quietest first: a boundary that is merely
-   there, the one the pointer could grab, and a drop that is about to
-   happen. The handles sit on the row whenever it is hovered, so they stay
-   under the content; the drop mark only appears mid-drag, when the reader
-   is already committed, so it can be the definite one. */
-.column-grip { border-radius: 1px; background: alpha(@window_fg_color, 0.12); }
-.column-grip-on { background: alpha(@window_fg_color, 0.24); }
+/* The mark that says where a dragged column or symbol will land, in the
+   colour the rail's own text is written in — the theme's foreground, which
+   is what `window_fg_color` and `sidebar_fg_color` are both defined from —
+   so it belongs to the row rather than sitting on top of it. */
 .column-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.42); }
 
 /* And lying down, between the symbols, for the same reason: a line where
    the dragged one will be inserted says more than a frame round whichever
    row the pointer happens to be over, so the rows lose the frame. */
 .row-drop { border-radius: 1px; background: alpha(@window_fg_color, 0.42); }
+/* Nothing lights up under a drag. The row the pointer happens to be over
+   is not where the thing is going — the line is — and a box drawn round it
+   says otherwise, as well as giving the line an edge to look misaligned
+   against. Hover only: a row that was selected before the drag stays
+   selected through it. */
+.dragging row:hover {
+  background: none;
+  background-image: none;
+  box-shadow: none;
+}
+
 .symbol-row:drop(active),
 .section-row:drop(active) {
   outline: none;
@@ -757,11 +765,11 @@ mod tests {
         // The marks on the heading row are the headings' own colour rather
         // than a colour of their own.
         assert!(css.contains(".column-drop { border-radius: 1px; background: alpha(@window_fg_color"));
-        assert!(css.contains(".column-grip { border-radius: 1px; background: alpha(@window_fg_color"));
         // The headings carry the drop tick alone; a frame as well is noise.
         assert!(css.contains(".column-headings:drop(active)"));
         assert!(css.contains(".symbol-row:drop(active)"));
         assert!(css.contains(".section-row:drop(active)"));
+        assert!(css.contains(".dragging row:hover"));
     }
 
     #[test]
