@@ -522,6 +522,16 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    it would take, in the palette's blue. */
 .column-drop { border-radius: 1px; background: @omacharts_blue; }
 
+/* The tick is the whole of the answer, so the headings do not also wear the
+   frame GTK draws around a drop target. Only this row: the symbols below
+   keep theirs, which is how you can tell a dropped symbol will land. */
+.column-headings:drop(active) {
+  outline: none;
+  box-shadow: none;
+  background: none;
+  background-image: none;
+}
+
 /* The watchlist's name, in the band the corner controls already reserved.
    Text with a chevron rather than a button: it names what you are looking at,
    and brightens rather than lighting up a background under the pointer, so the
@@ -730,6 +740,8 @@ mod tests {
         assert!(css.contains("@define-color omacharts_up "));
         assert!(css.contains("@define-color omacharts_down "));
         assert!(css.contains("@define-color omacharts_blue "));
+        // The headings carry the drop tick alone; a frame as well is noise.
+        assert!(css.contains(".column-headings:drop(active)"));
     }
 
     #[test]

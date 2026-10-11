@@ -509,6 +509,9 @@ impl Watchlist {
         // from the rail's edge (see the switcher above) and ends 24px from the
         // other, 6px of Adwaita's row margin and 8 of padding past its own 10.
         let column_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        // Named so the stylesheet can take GTK's drop outline off this one
+        // row without touching the drop feedback on the symbols below.
+        column_header.add_css_class("column-headings");
 
         // A tick between two titles rather than a rule down the row: it says
         // where the column lands without reading as a divider between them.
