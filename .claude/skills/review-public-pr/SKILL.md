@@ -123,6 +123,23 @@ Then exercise the actual binary. If the PR fixes a bug, reproduce the bug on
 exact commands and output in whatever you write afterwards, and never claim
 to have run something you did not.
 
+**A user-facing change is tested end to end, through the path the user
+takes.** Green tests say the code does what its author thought; they do not
+say the feature works. So if the change shows up in the window, drive the
+window — press the key, open the picker, look at the pixels. If it shows up
+in the CLI, run the command and read its real output. If it changes what is
+saved, restart and see that it came back. Walk the whole path, not the unit
+underneath it: a chart's resolution came back correct from `set_timeframe`
+in every test while the strip beside it still showed the old one, and only
+clicking the dropdown found that. Probe the edges of that path too, and say
+what happened at each one.
+
+The evidence goes in the report as what you did and what you saw —
+the commands, the output, the screenshot — never as "verified" or
+"works as described". A claim with no observation behind it is the one
+thing the owner cannot check, and he reads these reports instead of
+running the PR himself.
+
 Sandboxing the CLI, which is easy to get wrong:
 
 ```
