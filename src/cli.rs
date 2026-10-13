@@ -120,6 +120,15 @@ pub trait Caller {
     /// The text of `path` as the caller means it: relative to where they
     /// were, or their stdin for `-`.
     fn read(&self, path: &str) -> Result<String, Fault>;
+
+    /// The home directory a command that writes outside the database writes
+    /// under — `plugin install` and `uninstall` edit the shell's configuration
+    /// there. Whoever is running, unless a test says otherwise: the test that
+    /// runs every example ran these against the home of whoever ran the suite,
+    /// and took their bar widget out.
+    fn home(&self) -> std::path::PathBuf {
+        crate::store::home()
+    }
 }
 
 /// This process, which is the caller whenever there is no window.
