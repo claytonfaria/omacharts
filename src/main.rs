@@ -109,8 +109,8 @@ fn main() -> glib::ExitCode {
         // process: `omacharts --provider tos NVDA` typed at a terminal with a
         // window already open arrives here, and `tos` must not be read as a
         // second symbol.
-        let (args, asked_for) = match cli::peel_launch(&given) {
-            Ok(peeled) => (peeled.args, peeled.provider),
+        let (args, asked_for, in_list) = match cli::peel_launch(&given) {
+            Ok(peeled) => (peeled.args, peeled.provider, peeled.watchlist),
             Err(fault) => {
                 command_line.printerr_literal(&format!("omacharts: {}\n", fault.message));
                 return glib::ExitCode::from(fault.code);
@@ -216,8 +216,29 @@ fn main() -> glib::ExitCode {
 
         let symbols: Vec<String> =
             args.iter().skip(1).filter(|arg| !arg.starts_with('-')).cloned().collect();
+        // Resolved here rather than when it was peeled, because this is the
+        // first point with a database to resolve it against. A list that does
+        // not exist is refused the way a misspelt feed is, with the window
+        // still put up.
+        let watchlist = match in_list.as_deref().map(|selector| {
+            Store::open()
+                .map_err(|error| cli::Fault::new(cli::EXIT_ERROR, error.to_string()))
+                .and_then(|store| cli::watchlist_named(&store, selector))
+        }) {
+            None => None,
+            Some(Ok(id)) => Some(id),
+            Some(Err(fault)) => {
+                window.window.present();
+                command_line.printerr_literal(&format!("omacharts: {}\n", fault.message));
+                return glib::ExitCode::from(fault.code);
+            }
+        };
         if let Some(symbol) = symbols.first() {
-            window.show_named(&symbol.to_uppercase(), symbols.get(1).map(String::as_str));
+            window.show_named(
+                &symbol.to_uppercase(),
+                symbols.get(1).map(String::as_str),
+                watchlist,
+            );
         }
 
         window.window.present();

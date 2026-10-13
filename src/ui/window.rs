@@ -7337,10 +7337,25 @@ impl Window {
     ///
     /// `false` when no list holds it, which leaves the caller to do the one
     /// thing that is still right — put the window up.
-    pub fn show_named(self: &Rc<Self>, symbol: &str, suffix: Option<&str>) -> bool {
+    ///
+    /// With `watchlist`, that list is where it is looked for first, and the
+    /// window moves to it even when the book you are in holds the symbol too:
+    /// the bar widget shows the default list, and a click there is a click in
+    /// that list, not in whichever one happened to be on screen.
+    pub fn show_named(
+        self: &Rc<Self>,
+        symbol: &str,
+        suffix: Option<&str>,
+        watchlist: Option<i64>,
+    ) -> bool {
         let Some(instrument) = self.index.find(symbol, suffix) else {
             return false;
         };
+
+        if let Some(wanted) = watchlist.filter(|id| self.list_holds(*id, symbol, suffix)) {
+            self.show_watchlist(wanted);
+            return self.pick_in_rail(&instrument);
+        }
 
         // The book you are in wins any tie. "The first where it is available"
         // says nothing about two books holding the same symbol, and being
@@ -7364,6 +7379,30 @@ impl Window {
         // rail is showing, and until it has been rebuilt those are the last
         // book's rows.
         self.pick_in_rail(&instrument)
+    }
+
+    /// Put `watchlist` in the rail: by staying, when it is already there; by
+    /// moving to the chartbook showing it, when one is; and otherwise by
+    /// pointing the book on screen at it, which only a list nobody else has
+    /// can be.
+    fn show_watchlist(self: &Rc<Self>, watchlist: i64) {
+        let rail = self.watchlist.borrow().as_ref().cloned();
+        let Some(rail) = rail else { return };
+        if rail.active_watchlist() == watchlist {
+            return;
+        }
+        let active = self.active.get();
+        let showing = self
+            .books
+            .borrow()
+            .iter()
+            .enumerate()
+            .find(|(at, book)| *at != active && book.watchlist == Some(watchlist))
+            .map(|(at, _)| at);
+        match showing {
+            Some(index) => self.activate_book(index),
+            None => rail.set_active_watchlist(self.rail_for_book(watchlist)),
+        }
     }
 
     fn list_holds(&self, watchlist: i64, symbol: &str, suffix: Option<&str>) -> bool {
