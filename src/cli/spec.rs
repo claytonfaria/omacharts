@@ -107,8 +107,8 @@ pub const LAUNCH: &[Launch] = &[
     Launch {
         long: "watchlist",
         value: "LIST",
-        help: "open the symbol in this watchlist, switching to the chartbook \
-               showing it; a name or id:N",
+        help: "show this watchlist, switching to the chartbook showing it, and \
+               open the symbol in it; a name or id:N",
         values: &[],
     },
 ];

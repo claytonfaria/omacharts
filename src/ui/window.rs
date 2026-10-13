@@ -7382,10 +7382,15 @@ impl Window {
     }
 
     /// Put `watchlist` in the rail: by staying, when it is already there; by
-    /// moving to the chartbook showing it, when one is; and otherwise by
-    /// pointing the book on screen at it, which only a list nobody else has
-    /// can be.
-    fn show_watchlist(self: &Rc<Self>, watchlist: i64) {
+    /// moving to another chartbook showing it, when one is; and otherwise by
+    /// pointing the book on screen at it.
+    ///
+    /// Not [`book_using`]: that one says the default list is nobody's, which is
+    /// right for handing a list out and wrong here. Several books can show the
+    /// default, and moving to one of them is gentler than taking the book you
+    /// are in off its own list. A list no other book shows is free to take, so
+    /// it is handed straight to the rail rather than through `rail_for_book`.
+    pub fn show_watchlist(self: &Rc<Self>, watchlist: i64) {
         let rail = self.watchlist.borrow().as_ref().cloned();
         let Some(rail) = rail else { return };
         if rail.active_watchlist() == watchlist {
@@ -7397,12 +7402,17 @@ impl Window {
             .borrow()
             .iter()
             .enumerate()
-            .find(|(at, book)| *at != active && book.watchlist == Some(watchlist))
-            .map(|(at, _)| at);
+            .position(|(at, book)| at != active && book.watchlist == Some(watchlist));
         match showing {
             Some(index) => self.activate_book(index),
-            None => rail.set_active_watchlist(self.rail_for_book(watchlist)),
+            None => rail.set_active_watchlist(watchlist),
         }
+    }
+
+    /// The database this window reads, for a launch that has to resolve
+    /// something against it.
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     fn list_holds(&self, watchlist: i64, symbol: &str, suffix: Option<&str>) -> bool {

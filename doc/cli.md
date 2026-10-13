@@ -871,8 +871,9 @@ A click on a ticker in the widget runs `omacharts --watchlist id:1 NVDA`. The
 widget shows the default watchlist, so that is the list the window moves to:
 the chartbook showing it, or — when none does — the book on screen, pointed at
 it. Without `--watchlist`, a bare symbol stays in the list you are in when that
-list holds it. The option takes a name or `id:N`, and a list that does not
-exist is refused with the window still put up:
+list holds it. Without a symbol, `--watchlist` just brings that list on
+screen the same way. The option takes a name or `id:N`, and a list that does
+not exist is refused with the window still put up:
 
 ```
 omacharts --watchlist Default NVDA
