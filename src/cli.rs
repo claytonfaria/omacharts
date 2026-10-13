@@ -123,9 +123,7 @@ pub trait Caller {
 
     /// The home directory a command that writes outside the database writes
     /// under — `plugin install` and `uninstall` edit the shell's configuration
-    /// there. Whoever is running, unless a test says otherwise: the test that
-    /// runs every example ran these against the home of whoever ran the suite,
-    /// and took their bar widget out.
+    /// there. Whoever is running, unless a test says otherwise.
     fn home(&self) -> std::path::PathBuf {
         crate::store::home()
     }

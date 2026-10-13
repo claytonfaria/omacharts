@@ -5027,9 +5027,6 @@ mod tests {
         }
     }
 
-    /// Where a window would be, so the verbs that default to the focused chart
-    /// run rather than refusing. Nothing to flush or redraw: the store is the
-    /// only thing a test has.
     /// A caller whose home is a fresh directory of its own.
     ///
     /// For running commands as written: `plugin install` and `uninstall` edit
@@ -5045,7 +5042,6 @@ mod tests {
                 std::process::id(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
-            let _ = std::fs::remove_dir_all(&at);
             ScratchHome(at)
         }
     }
@@ -5092,6 +5088,9 @@ mod tests {
         assert!(!widget.exists(), "and taken out of it again");
     }
 
+    /// Where a window would be, so the verbs that default to the focused chart
+    /// run rather than refusing. Nothing to flush or redraw: the store is the
+    /// only thing a test has.
     struct NoWindow;
 
     impl Live for NoWindow {
@@ -5133,6 +5132,9 @@ mod tests {
     /// the example names, which is not what is being tested.
     #[test]
     fn every_example_in_the_table_is_a_command_that_runs() {
+        // `plugin install` and `uninstall` write under the caller's home, and
+        // `skill install` is pointed into it below.
+        let home = ScratchHome::new();
         for noun in super::super::spec::SURFACE {
             for verb in noun.verbs {
                 // The one example that would go to the network. Its shape is
@@ -5153,14 +5155,10 @@ mod tests {
                 // Only `skill`'s `--to` is a place on disk; a drawing's
                 // `--to` is the other end of a line.
                 if noun.name == "skill" && verb.flags.iter().any(|flag| flag.long == "to") {
-                    let scratch = std::env::temp_dir()
-                        .join(format!("omacharts-example-{}", std::process::id()))
-                        .join(verb.name);
-                    let _ = std::fs::remove_dir_all(&scratch);
                     args.push("--to".to_string());
-                    args.push(scratch.to_string_lossy().into_owned());
+                    args.push(home.0.join("skills").join(verb.name).to_string_lossy().into_owned());
                 }
-                let outcome = dispatch(&args, &store, Some(&NoWindow), &ScratchHome::new());
+                let outcome = dispatch(&args, &store, Some(&NoWindow), &home);
                 assert_ne!(
                     outcome.code,
                     super::super::EXIT_USAGE,
@@ -5568,6 +5566,7 @@ mod tests {
         let blocks = omacharts_commands_in(SKILL);
         assert!(blocks.len() >= 4, "no commands found in the skill: is it still a markdown file?");
 
+        let home = ScratchHome::new();
         for block in &blocks {
             // One store per block. Each is a recipe somebody starts from
             // wherever they are, not a continuation of the one above it.
@@ -5576,7 +5575,7 @@ mod tests {
                 let args: Vec<String> = std::iter::once("omacharts".to_string())
                     .chain(words_of(line))
                     .collect();
-                let outcome = dispatch(&args, &store, Some(&NoWindow), &ScratchHome::new());
+                let outcome = dispatch(&args, &store, Some(&NoWindow), &home);
                 assert_eq!(
                     outcome.code,
                     super::super::EXIT_OK,
