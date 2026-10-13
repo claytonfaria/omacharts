@@ -5042,6 +5042,10 @@ mod tests {
                 std::process::id(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
+            // Drop clears it, but a run that was killed never drops, and a pid
+            // comes round again. A widget left there would make `install` an
+            // update, and an update asks the live shell to reload its plugins.
+            let _ = std::fs::remove_dir_all(&at);
             ScratchHome(at)
         }
     }
@@ -5572,9 +5576,17 @@ mod tests {
             // wherever they are, not a continuation of the one above it.
             let store = skill_seed();
             for line in block {
-                let args: Vec<String> = std::iter::once("omacharts".to_string())
+                let mut args: Vec<String> = std::iter::once("omacharts".to_string())
                     .chain(words_of(line))
                     .collect();
+                // The skill commands find an agent's configuration for
+                // themselves rather than asking the caller, so a workflow that
+                // ever installs the skill is pointed into the scratch home
+                // the way the table's own example is.
+                if args.get(1).map(String::as_str) == Some("skill") {
+                    args.push("--to".to_string());
+                    args.push(home.0.join("skills").to_string_lossy().into_owned());
+                }
                 let outcome = dispatch(&args, &store, Some(&NoWindow), &home);
                 assert_eq!(
                     outcome.code,
