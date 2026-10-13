@@ -225,11 +225,18 @@ fn main() -> glib::ExitCode {
         match in_list.as_deref().map(|list| cli::watchlist_named(window.store(), list)).transpose() {
             Ok(watchlist) => match symbols.first() {
                 Some(symbol) => {
-                    window.show_named(
+                    let shown = window.show_named(
                         &symbol.to_uppercase(),
                         symbols.get(1).map(String::as_str),
                         watchlist,
                     );
+                    if !shown && let Some(list) = in_list.as_deref() {
+                        command_line.printerr_literal(&format!(
+                            "omacharts: {} is not in watchlist {list:?}\n",
+                            symbols.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>().join(" "),
+                        ));
+                        code = glib::ExitCode::from(cli::EXIT_NOT_FOUND);
+                    }
                 }
                 None => {
                     if let Some(id) = watchlist {

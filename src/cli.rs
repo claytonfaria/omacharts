@@ -310,6 +310,17 @@ pub fn peel_launch(args: &[String]) -> Result<Launched, Fault> {
         }
     }
 
+    // A list to open things in means nothing to a command, and a command
+    // that ran as if it had been scoped to one is worse than one that was
+    // refused: `--watchlist Tech chart set --symbol NVDA` would act on the
+    // focused chart wherever it is, and exit 0.
+    if watchlist.is_some() && is_command(&kept) {
+        return Err(Fault::usage(
+            "--watchlist says which list to open a symbol in; it does not apply to commands"
+                .into(),
+        ));
+    }
+
     Ok(Launched { args: kept, provider, watchlist })
 }
 
@@ -782,6 +793,16 @@ mod tests {
         assert_eq!(peeled.args, line(&["omacharts", "SAP", "DE"]));
         assert_eq!(peeled.watchlist.as_deref(), Some("id:1"));
         assert!(!is_command(&peeled.args));
+    }
+
+    /// A command run as if it were scoped to a list, when it was not, is the
+    /// answer an agent cannot tell from the right one.
+    #[test]
+    fn a_watchlist_in_front_of_a_command_is_refused() {
+        let fault = peel_launch(&line(&["omacharts", "--watchlist", "Tech", "watchlist", "list"]))
+            .unwrap_err();
+        assert_eq!(fault.code, EXIT_USAGE);
+        assert!(fault.message.contains("--watchlist"), "{}", fault.message);
     }
 
     #[test]

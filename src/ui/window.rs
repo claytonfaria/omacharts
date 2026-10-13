@@ -7338,24 +7338,28 @@ impl Window {
     /// `false` when no list holds it, which leaves the caller to do the one
     /// thing that is still right — put the window up.
     ///
-    /// With `watchlist`, that list is where it is looked for first, and the
-    /// window moves to it even when the book you are in holds the symbol too:
-    /// the bar widget shows the default list, and a click there is a click in
-    /// that list, not in whichever one happened to be on screen.
+    /// With `watchlist`, the window moves to that list whatever else holds
+    /// the symbol, and the symbol is picked only there: the bar widget shows
+    /// the default list, and a click there is a click in that list, not in
+    /// whichever one happened to be on screen. `false` then means that list
+    /// does not hold it, and nothing was searched for instead — a list that
+    /// was asked for and quietly swapped for another is the answer a script
+    /// cannot tell from the right one.
     pub fn show_named(
         self: &Rc<Self>,
         symbol: &str,
         suffix: Option<&str>,
         watchlist: Option<i64>,
     ) -> bool {
+        if let Some(wanted) = watchlist {
+            self.show_watchlist(wanted);
+            return self.list_holds(wanted, symbol, suffix)
+                && self.index.find(symbol, suffix).is_some_and(|i| self.pick_in_rail(&i));
+        }
+
         let Some(instrument) = self.index.find(symbol, suffix) else {
             return false;
         };
-
-        if let Some(wanted) = watchlist.filter(|id| self.list_holds(*id, symbol, suffix)) {
-            self.show_watchlist(wanted);
-            return self.pick_in_rail(&instrument);
-        }
 
         // The book you are in wins any tie. "The first where it is available"
         // says nothing about two books holding the same symbol, and being
