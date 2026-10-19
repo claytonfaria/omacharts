@@ -5570,23 +5570,16 @@ mod tests {
         let blocks = omacharts_commands_in(SKILL);
         assert!(blocks.len() >= 4, "no commands found in the skill: is it still a markdown file?");
 
+        // A workflow that ever puts the widget in the bar does it here.
         let home = ScratchHome::new();
         for block in &blocks {
             // One store per block. Each is a recipe somebody starts from
             // wherever they are, not a continuation of the one above it.
             let store = skill_seed();
             for line in block {
-                let mut args: Vec<String> = std::iter::once("omacharts".to_string())
+                let args: Vec<String> = std::iter::once("omacharts".to_string())
                     .chain(words_of(line))
                     .collect();
-                // The skill commands find an agent's configuration for
-                // themselves rather than asking the caller, so a workflow that
-                // ever installs the skill is pointed into the scratch home
-                // the way the table's own example is.
-                if args.get(1).map(String::as_str) == Some("skill") {
-                    args.push("--to".to_string());
-                    args.push(home.0.join("skills").to_string_lossy().into_owned());
-                }
                 let outcome = dispatch(&args, &store, Some(&NoWindow), &home);
                 assert_eq!(
                     outcome.code,
