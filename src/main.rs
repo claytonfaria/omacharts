@@ -228,18 +228,20 @@ fn main() -> glib::ExitCode {
                     let shown = window.show_named(
                         &symbol.to_uppercase(),
                         symbols.get(1).map(String::as_str),
-                        watchlist,
+                        watchlist.as_ref().map(|(id, _)| *id),
                     );
-                    if !shown && let Some(list) = in_list.as_deref() {
+                    // By its name, which is what the rail shows: the bar
+                    // names the list as `id:1`.
+                    if !shown && let Some((_, name)) = &watchlist {
                         command_line.printerr_literal(&format!(
-                            "omacharts: {} is not in watchlist {list:?}\n",
+                            "omacharts: {} is not in watchlist {name:?}\n",
                             symbols.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>().join(" "),
                         ));
                         code = glib::ExitCode::from(cli::EXIT_NOT_FOUND);
                     }
                 }
                 None => {
-                    if let Some(id) = watchlist {
+                    if let Some((id, _)) = watchlist {
                         window.show_watchlist(id);
                     }
                 }

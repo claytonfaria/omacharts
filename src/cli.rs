@@ -324,9 +324,9 @@ pub fn peel_launch(args: &[String]) -> Result<Launched, Fault> {
     Ok(Launched { args: kept, provider, watchlist })
 }
 
-/// The id of the watchlist `--watchlist` named: a name, or `id:N`.
-pub fn watchlist_named(store: &Store, selector: &str) -> Result<i64, Fault> {
-    exec::find_list(store, selector).map(|(id, _)| id)
+/// The watchlist `--watchlist` named, a name or `id:N`, as its id and name.
+pub fn watchlist_named(store: &Store, selector: &str) -> Result<(i64, String), Fault> {
+    exec::find_list(store, selector)
 }
 
 /// `name=value` as a long option's two halves.
@@ -809,9 +809,9 @@ mod tests {
     fn a_watchlist_is_found_by_name_or_id_and_refused_when_missing() {
         let store = Store::memory().expect("an in-memory store");
         let id = store.add_watchlist("Tech").expect("a watchlist");
-        assert_eq!(watchlist_named(&store, "tech").unwrap(), id);
-        assert_eq!(watchlist_named(&store, &format!("id:{id}")).unwrap(), id);
-        assert_eq!(watchlist_named(&store, "id:1").unwrap(), crate::store::DEFAULT_WATCHLIST);
+        assert_eq!(watchlist_named(&store, "tech").unwrap(), (id, "Tech".into()));
+        assert_eq!(watchlist_named(&store, &format!("id:{id}")).unwrap().0, id);
+        assert_eq!(watchlist_named(&store, "id:1").unwrap().0, crate::store::DEFAULT_WATCHLIST);
         assert_eq!(watchlist_named(&store, "Nowhere").unwrap_err().code, EXIT_NOT_FOUND);
     }
 
